@@ -4,6 +4,16 @@
 
 需要 Node.js 22+；dsh 已验证版本为 `0.2.1-rc.2`。
 
+### 从 npm 安装
+
+将插件安装到 Web profile：
+
+```powershell
+dsh plugin --profile web add @fevolq/terms-bridge
+```
+
+安装指定版本时使用 `@fevolq/terms-bridge@0.1.0`；更新到最新版本时执行 `dsh plugin --profile web update @fevolq/terms-bridge --latest`。
+
 ### 从源码构建
 
 从 GitHub 下载或克隆源码后，在包含 `package.json` 的仓库根目录执行：
