@@ -1,0 +1,6 @@
+# Installs only this plugin; projects are configured through the settings page.
+- insert:
+    - id: terms-bridge
+      name: '@fevolq/terms-bridge'
+      config:
+        projects: {}

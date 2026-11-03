@@ -1,0 +1,8 @@
+{
+  "metadata": {
+    "project_id": "news",
+    "task_id": "files-001"
+  },
+  "instruction": "请生成一份简短报告，保存为 report.md，并在最终回复中给出文件链接。",
+  "files": []
+}

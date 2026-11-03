@@ -1,0 +1,26 @@
+# Dependencies and build output
+node_modules/
+dist/
+*.tgz
+*.zip
+
+# Local configuration and development output
+.env
+.env.*
+!.env.example
+*.log
+.work/
+coverage/
+
+# Python examples
+.venv/
+__pycache__/
+*.py[cod]
+*.sqlite3
+*.sqlite3-*
+
+# Editor and OS files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
