@@ -4,19 +4,37 @@
 
 需要 Node.js 22+；dsh 已验证版本为 `0.2.1-rc.2`。
 
-### 从 npm 安装
+### 从 npm 安装（推荐）
 
-将插件安装到 Web profile：
+插件已发布到 [npm](https://www.npmjs.com/package/@fevolq/terms-bridge)，日常安装和更新优先使用此方式。以下命令使用 Web profile，请将 `web` 替换为实际使用的 profile：
 
 ```powershell
 dsh plugin --profile web add @fevolq/terms-bridge
 ```
 
-安装指定版本时使用 `@fevolq/terms-bridge@0.1.0`；更新到最新版本时执行 `dsh plugin --profile web update @fevolq/terms-bridge --latest`。
+已安装时，更新到最新版本：
+
+```powershell
+dsh plugin --profile web update @fevolq/terms-bridge --latest
+```
+
+需要固定版本时，例如安装 `0.1.0`：
+
+```powershell
+dsh plugin --profile web add @fevolq/terms-bridge@0.1.0
+```
+
+### 从本地安装包安装
+
+已取得构建好的 `.tgz` 包时，在安装包所在目录执行：
+
+```powershell
+dsh plugin --profile web add ./fevolq-terms-bridge-0.1.0.tgz --ignore-scripts
+```
 
 ### 从源码构建
 
-从 GitHub 下载或克隆源码后，在包含 `package.json` 的仓库根目录执行：
+需要修改或自行构建插件时，从 GitHub 下载或克隆源码，在包含 `package.json` 的仓库根目录执行：
 
 ```powershell
 npm ci
@@ -24,19 +42,13 @@ npm test
 npm pack
 ```
 
-`npm ci` 按锁文件安装依赖；`npm test` 构建并运行测试；`npm pack` 重新构建并生成 `fevolq-terms-bridge-0.1.0.tgz`。安装包包含运行所需依赖，可复制到其他机器安装。
+`npm ci` 按锁文件安装依赖；`npm test` 构建并运行测试；`npm pack` 重新构建并生成 `fevolq-terms-bridge-0.1.0.tgz`，然后按上面的本地安装包方式安装。安装包包含运行所需依赖，可复制到其他机器安装。
 
 源码目录：`src/` 为插件后端，`client/` 为设置页面，`tests/` 为测试，`examples/` 为项目接入示例，`scripts/` 为构建脚本。`dist/`、`node_modules/` 和打包产物不提交到 Git。
 
 原生 dsh 集成测试需要将环境变量 `DSH_TEST_PACKAGE` 设置为本机 dsh 的 `package.json` 绝对路径，未设置时跳过。测试使用临时配置和模拟模型。Python 示例及其集成测试需要 Python 3.10+；未找到 Python 时跳过相应测试，插件本身不依赖 Python。
 
-### 安装构建好的包
-
-在发布包所在目录执行，以下使用 Web profile：
-
-```powershell
-dsh plugin --profile web add ./fevolq-terms-bridge-0.1.0.tgz --ignore-scripts
-```
+### 安装后配置
 
 安装或升级插件后，重新加载插件或重启对应的 dsh 实例。每个 profile 只启用一个 terms-bridge 实例。
 
