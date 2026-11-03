@@ -1,7 +1,5 @@
 # terms-bridge 使用说明
 
-适用版本：`@fevolq/terms-bridge@0.1.0`。功能概览见[插件说明](../README.md)。
-
 ## 安装插件
 
 需要 Node.js 22+；dsh 已验证版本为 `0.2.1-rc.2`。

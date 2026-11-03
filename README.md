@@ -1,7 +1,3 @@
-# fevolq/terms-bridge
-
-**版本：0.1.0 · npm 包名：`@fevolq/terms-bridge`**
-
 terms-bridge 是 DeepSeek Harness（dsh）的项目接入插件，用来连接业务项目与 dsh。业务项目提交提示词和文件，插件在对应工作区内创建会话执行任务，并将 AI 的最终回复和结果文件引用回传给项目。
 
 安装、配置、接口协议和完整调用示例见[使用说明](docs/usage.md)。
