@@ -44,7 +44,7 @@ test('UI project removal rejects unfinished tasks before saving and persists aft
     export const table = new MemoryTable();
     export function apply(ctx) {
       const workspaceRegistry = { list: () => [{ path: ${JSON.stringify(defaultWorkspace)}, title: 'default-workspace' }] };
-      ctx.effect(() => watchProjectConfig({ fiber: ctx.fiber, on: ctx.on.bind(ctx), workspaceRegistry }, new Map(), new TaskStore(table)));
+      ctx.effect(() => watchProjectConfig({ fiber: ctx.fiber, on: ctx.on.bind(ctx), workspaceRegistry }, new Map(), new TaskStore(table, new MemoryTable())));
     }
   `);
   const entries = [
@@ -105,7 +105,7 @@ test('UI project removal rejects unfinished tasks before saving and persists aft
   const project = f.projects.get('news');
   f.projects.clear(); f.projects.set('remove-me', project);
   await f.engine.accept(request('pending', 'remove-me'));
-  const record = () => f.store.get(taskKey('remove-me', 'pending'));
+  const record = () => f.store.get(taskKey('remove-me', 'pending', 'chat-1'));
   const beforeRemoval = await readFile(profile.patchPath, 'utf8');
   let beforeRevision = descriptor().revision;
   async function rejectedBeforeWrite() {

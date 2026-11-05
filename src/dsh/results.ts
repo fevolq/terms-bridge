@@ -5,6 +5,18 @@ import { ApiError } from '../domain/request.js';
 import { inside, regularFile } from '../storage/paths.js';
 import type { ContentBlock, SessionEvent } from './host.js';
 
+/** Match the submitted message, not whichever turn happened to finish last. */
+export function attemptEvents(events: readonly SessionEvent[], messageId: string): readonly SessionEvent[] {
+  let start = -1, matched = false;
+  for (let index = 0; index < events.length; index++) {
+    const event = events[index]!;
+    if (event.type === 'turn/start') { start = index; matched = false; }
+    if (event.type === 'user/message' && event.data.id === messageId && start >= 0) matched = true;
+    if (event.type === 'turn/end' && matched) return events.slice(start, index + 1);
+  }
+  throw new Error('Submitted task has no completed turn');
+}
+
 export function finalResponse(events: readonly SessionEvent[]): ContentBlock[] {
   let ended = false;
   for (let index = events.length - 1; index >= 0; index--) {

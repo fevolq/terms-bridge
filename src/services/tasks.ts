@@ -1,13 +1,16 @@
-import { ApiError, bytes, fingerprint, taskKey, validateRequest } from '../domain/request.js';
-import { active, beginDelivery, beginExecution, completed, deliveryFinished, executionFailed, publicTask, queued } from '../domain/task.js';
-import { UnsettledExecutionError, type ResolvedProject, type Run, type TaskRecord, type UploadedFile } from '../domain/types.js';
+import { ApiError, bytes, conversationKey, resolveMetadata, taskKey, validateRequest } from '../domain/request.js';
+import { beginDelivery, beginExecution, completed, deliveryFinished, executionFailed, publicTask, queued } from '../domain/task.js';
+import { UnsettledExecutionError, type ResolvedProject, type Run, type TaskMetadata, type TaskRecord, type UploadedFile } from '../domain/types.js';
 import { LIMITS } from '../shared/rules.js';
 import type { TaskStore } from '../storage/tasks.js';
+
+const readyAt = (task: TaskRecord): string => task.execution.next_retry_at ?? task.created_at;
 
 interface TaskPorts {
   files: { resolve(projectId: string, project: ResolvedProject, refs: { file_id: string }[]): Promise<UploadedFile[]> };
   callback(task: TaskRecord, signal: AbortSignal): Promise<string | null>;
   now?: () => number; log?: (message: string) => void; sessionExists?: (id: string) => Promise<boolean>;
+  sessionBusy?: (id: string) => boolean;
 }
 /** Application service: scheduling and durable commands, with all external work injected. */
 export class TaskEngine {
@@ -41,45 +44,46 @@ export class TaskEngine {
   }
   async accept(input: unknown) {
     this.assertReady();
-    const request = validateRequest(input), project = this.project(request.metadata.project_id);
-    const key = taskKey(request.metadata.project_id, request.metadata.task_id);
-    return this.track(this.store.locked(key, async () => {
+    const metadata = resolveMetadata(input), project = this.project(metadata.project_id);
+    const key = taskKey(metadata.project_id, metadata.conversation_id, metadata.chat_id);
+    return this.track(this.store.locked(conversationKey(metadata.project_id, metadata.conversation_id), async () => {
       this.assertReady();
-      const previous = this.store.get(key);
-      if (previous) {
-        const existing = await this.checkSession(key);
-        if (existing.session_deleted) throw new ApiError(404, 'SESSION_NOT_FOUND', '会话不存在');
-        if (existing.fingerprint !== fingerprint(request)) throw new ApiError(409, 'TASK_CONFLICT', 'Task ID already has different content');
-      } else {
-        const files = await this.ports.files.resolve(request.metadata.project_id, project, request.files);
-        await this.store.put(key, queued(request, project, files, this.now()));
-      }
-      return { status: previous ? 200 : 202,
-        body: { metadata: request.metadata, status: previous?.status ?? 'queued', duplicate: Boolean(previous) },
-        location: `/projects/${encodeURIComponent(request.metadata.project_id)}/tasks/${encodeURIComponent(request.metadata.task_id)}` };
+      if (this.store.get(key)) throw new ApiError(409, 'CHAT_ALREADY_EXISTS', 'chat_id already exists in this conversation', metadata);
+      if (await this.conversationDeleted(metadata)) throw new ApiError(404, 'SESSION_NOT_FOUND', '会话不存在', metadata);
+      const existing = this.store.conversations.get(metadata);
+      if (this.store.busy(metadata) || existing && this.ports.sessionBusy?.(existing.session_id)) throw new ApiError(409, 'CONVERSATION_BUSY', 'Conversation has an unfinished task', metadata);
+      const request = validateRequest(input, metadata);
+      const files = await this.ports.files.resolve(metadata.project_id, project, request.files);
+      this.assertReady();
+      // An empty binding after a failed task write does not reserve the conversation.
+      const conversation = await this.store.conversations.ensure(metadata, project);
+      await this.store.put(key, queued(request, project, files, this.now(), conversation));
+      return { status: 202, body: { metadata, status: 'queued' },
+        location: `/projects/${encodeURIComponent(metadata.project_id)}/conversations/${encodeURIComponent(metadata.conversation_id)}/chats/${encodeURIComponent(metadata.chat_id)}` };
     }), true);
   }
-  async query(projectId: string, taskId: string) {
-    const key = taskKey(projectId, taskId);
-    if (!this.store.get(key)) throw new ApiError(404, 'TASK_NOT_FOUND', 'Task not found');
-    const task = await this.checkSession(key);
-    if (task.session_deleted) throw new ApiError(404, 'SESSION_NOT_FOUND', '会话不存在');
-    return publicTask(task);
+  async query(projectId: string, conversationId: string, chatId: string) {
+    const key = taskKey(projectId, conversationId, chatId);
+    const task = this.store.get(key);
+    if (!task) throw new ApiError(404, 'TASK_NOT_FOUND', 'Task not found');
+    if (await this.conversationDeleted(task.request.metadata)) throw new ApiError(404, 'SESSION_NOT_FOUND', '会话不存在');
+    return publicTask(this.store.get(key)!);
   }
-  private async checkSession(key: string): Promise<TaskRecord> {
-    const task = this.store.get(key)!;
-    const id = task.execution.session_id;
-    // Allocation alone does not imply a persisted session: initialization failures still retry.
-    if (!task.session_deleted && id && task.execution.session_created && this.ports.sessionExists && !await this.ports.sessionExists(id)) {
-      return this.store.update(key, current => current.execution.session_id === id && current.execution.session_created ? { ...current, session_deleted: true } : current);
+  private async conversationDeleted(metadata: TaskMetadata): Promise<boolean> {
+    const conversation = this.store.conversations.get(metadata);
+    if (!conversation) return false;
+    if (conversation.deleted) return true;
+    if (conversation.created && this.ports.sessionExists && !await this.ports.sessionExists(conversation.session_id)) {
+      await this.store.conversations.mark(metadata, 'deleted');
+      return true;
     }
-    return this.store.get(key)!;
+    return this.store.conversations.get(metadata)?.deleted ?? false;
   }
   async recover(): Promise<void> {
-    for (const [key, task] of this.store.list()) if (active(task)) await this.checkSession(key);
+    for (const [, task] of this.store.list()) if (this.store.active(task)) await this.conversationDeleted(task.request.metadata);
     this.store.assertProjects(this.projects);
     for (const [key, task] of this.store.list()) {
-      if (task.session_deleted) continue;
+      if (this.store.deleted(task)) continue;
       if (task.status === 'running') await this.store.update(key, value => executionFailed(value, task.execution.attempt_id!, 'EXECUTION_INTERRUPTED', this.now()));
       if (task.status === 'completed' && task.delivery.in_flight) await this.store.update(key, value => deliveryFinished(value, 'CALLBACK_INTERRUPTED', this.now()));
     }
@@ -117,30 +121,35 @@ export class TaskEngine {
     for (const [id, project] of this.projects) {
       const tasks = groups.get(id) ?? [];
       let capacity = project.max_concurrency === 0 ? Infinity : project.max_concurrency - tasks.filter(([key]) => this.running.has(key)).length;
-      const ready = tasks.filter(([key, task]) => !this.running.has(key) && !task.session_deleted && ['queued', 'retrying'].includes(task.status) && Date.parse(task.ready_at) <= this.now());
-      ready.sort((a, b) => a[1].ready_at.localeCompare(b[1].ready_at));
+      const ready = tasks.filter(([key, task]) => !this.running.has(key) && !this.store.deleted(task) && ['queued', 'retrying'].includes(task.status) && Date.parse(readyAt(task)) <= this.now() && !this.ports.sessionBusy?.(task.execution.session_id));
+      ready.sort((a, b) => readyAt(a[1]).localeCompare(readyAt(b[1])));
       for (const [key] of ready) {
         if (capacity-- <= 0) break;
         this.launch(this.running, key, () => this.execute(key));
       }
       if (this.delivering.has(id)) continue;
-      const callbacks = tasks.filter(([, task]) => !task.session_deleted && task.status === 'completed' && ['pending', 'retrying'].includes(task.delivery.status) && !task.delivery.in_flight && (!task.delivery.next_retry_at || Date.parse(task.delivery.next_retry_at) <= this.now()));
+      const callbacks = tasks.filter(([, task]) => !this.store.deleted(task) && task.status === 'completed' && ['pending', 'retrying'].includes(task.delivery.status) && !task.delivery.in_flight && (!task.delivery.next_retry_at || Date.parse(task.delivery.next_retry_at) <= this.now()));
       callbacks.sort((a, b) => (a[1].delivery.next_retry_at ?? a[1].completed_at!).localeCompare(b[1].delivery.next_retry_at ?? b[1].completed_at!));
       if (callbacks[0]) this.launch(this.delivering, id, () => this.deliver(callbacks[0]![0]));
     }
   }
   private async execute(key: string): Promise<void> {
-    if ((await this.checkSession(key)).session_deleted || !this.available) return;
+    if (await this.conversationDeleted(this.store.get(key)!.request.metadata)) return;
+    const previous = this.store.get(key)!;
+    if (!this.available || this.ports.sessionBusy?.(previous.execution.session_id)) return;
     const task = await this.store.update(key, beginExecution);
-    if (task.session_deleted) return;
+    if (this.store.deleted(task)) return;
     const timeout = AbortSignal.timeout(task.project.execution_timeout_seconds * 1000);
     const signal = AbortSignal.any([timeout, this.stop.signal]);
     try {
-      const result = await this.run(task, signal, async () => {
-        await this.store.update(key, current => ({ ...current, execution: { ...current.execution, session_created: true } }));
-        signal.throwIfAborted();
+      const result = await this.run(task, signal, {
+        created: this.store.conversations.get(task.request.metadata)!.created,
+        ready: async () => {
+          if (!this.store.conversations.get(task.request.metadata)!.created) await this.store.conversations.mark(task.request.metadata, 'created');
+          signal.throwIfAborted();
+        },
       });
-      if ((await this.checkSession(key)).session_deleted) return;
+      if (await this.conversationDeleted(task.request.metadata)) return;
       signal.throwIfAborted();
       if (!result || typeof result.result !== 'string') throw new Error('No final assistant response');
       if (bytes(result.result) > LIMITS.json) throw new Error('Final response exceeds 1 MiB');
@@ -149,7 +158,12 @@ export class TaskEngine {
         return completed(current, task.execution.attempt_id!, result, this.now());
       });
     } catch (error) {
-      if ((await this.checkSession(key)).session_deleted) return;
+      if (await this.conversationDeleted(task.request.metadata)) return;
+      // The host can start work after admission. No prompt was sent, so no retry was spent.
+      if (error instanceof ApiError && error.code === 'CONVERSATION_BUSY') {
+        await this.store.update(key, current => ({ ...current, status: previous.status, execution: previous.execution }));
+        return;
+      }
       if (error instanceof UnsettledExecutionError) throw error;
       let detail = error instanceof Error ? error.message : 'Unknown execution error';
       for (const secret of [task.project.request_token, ...Object.values(task.project.callback_headers)]) if (secret) detail = detail.split(secret).join('[redacted]');
@@ -159,11 +173,11 @@ export class TaskEngine {
     }
   }
   private async deliver(key: string): Promise<void> {
-    if ((await this.checkSession(key)).session_deleted || !this.available) return;
+    if (await this.conversationDeleted(this.store.get(key)!.request.metadata) || !this.available) return;
     const task = await this.store.update(key, beginDelivery);
-    if (task.session_deleted || task.delivery.status === 'failed') return;
+    if (this.store.deleted(task) || task.delivery.status === 'failed') return;
     const error = await this.ports.callback(task, this.stop.signal);
-    if (!(await this.checkSession(key)).session_deleted) await this.store.update(key, current => deliveryFinished(current, error, this.now()));
+    if (!await this.conversationDeleted(task.request.metadata)) await this.store.update(key, current => deliveryFinished(current, error, this.now()));
   }
   async settle(): Promise<void> { await Promise.all([...this.running.values(), ...this.delivering.values()]); }
   async close(): Promise<void> {

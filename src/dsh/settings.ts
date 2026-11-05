@@ -1,6 +1,5 @@
 import Schema from '@deepseek-ai/schemastery';
 import { API_PATTERN, API_PREFIX, DEFAULTS, LIMITS, PERMISSIONS, TOKEN_PATTERN } from '../shared/rules.js';
-import { active } from '../domain/task.js';
 import { parseConfig } from '../projects/config.js';
 import { validateProjectWorkspaces } from '../projects/workspaces.js';
 import type { ResolvedProject } from '../domain/types.js';
@@ -39,7 +38,7 @@ export function watchProjectConfig(host: Host, projects: ReadonlyMap<string, Res
     validateProjectWorkspaces(host, config, projects);
     for (const [, task] of store.list()) {
       const id = task.request.metadata.project_id;
-      if (active(task) && !Object.hasOwn(config.projects, id)) throw new Error(`项目 ${id} 仍有未完成任务，请等待任务执行和结果回调结束后再移除`);
+      if (store.active(task) && !Object.hasOwn(config.projects, id)) throw new Error(`项目 ${id} 仍有未完成任务，请等待任务执行和结果回调结束后再移除`);
     }
     return candidate;
   });

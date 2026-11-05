@@ -10,7 +10,7 @@ async function server(t, fn) {
   t.after(async () => { s.closeAllConnections(); await new Promise(r => s.close(r)); });
   return `http://127.0.0.1:${s.address().port}`;
 }
-test('real HTTP API enforces project auth, idempotency, query and input validation', async t => {
+test('real HTTP API enforces project auth, duplicate rejection, query and input validation', async t => {
   const f = await fixture({ run: successRun });
   const base = await server(t, handler(f.engine, '/v1', f.transfer));
   const post = (body, authorization = 'Bearer test-request-token', headers = {}) => fetch(base + '/v1/tasks', {
@@ -18,13 +18,13 @@ test('real HTTP API enforces project auth, idempotency, query and input validati
   });
   assert.equal((await post(request(), 'Bearer wrong')).status, 401);
   const admitted = await post(request()); assert.equal(admitted.status, 202);
-  assert.equal(admitted.headers.get('location'), '/v1/projects/news/tasks/task-1');
-  assert.equal((await post(request())).status, 200);
+  assert.equal(admitted.headers.get('location'), '/v1/projects/news/conversations/task-1/chats/chat-1');
+  assert.equal((await post(request())).status, 409);
   assert.equal((await post({ ...request(), instruction: 'changed' })).status, 409);
   assert.equal((await post(request(), undefined, { 'Content-Type': 'text/plain' })).status, 415);
   assert.equal((await fetch(base + '/v1/tasks')).status, 405);
   await f.cycle();
-  const found = await fetch(base + '/v1/projects/news/tasks/task-1', { headers: { Authorization: 'Bearer test-request-token' } });
+  const found = await fetch(base + '/v1/projects/news/conversations/task-1/chats/chat-1', { headers: { Authorization: 'Bearer test-request-token' } });
   assert.equal(found.status, 200); assert.equal((await found.json()).result, 'done');
   const invalid = request('bad'); invalid.metadata.result_schema = {};
   assert.equal((await post(invalid)).status, 400); assert.equal(f.store.list().length, 1);
@@ -43,7 +43,7 @@ test('real callback POST carries fixed body and token; 2xx succeeds, redirect is
   const r = f.record(); r.project.callback_url = base + '/ok';
   assert.equal(await sendCallback(r, new AbortController().signal), null);
   assert.equal(received[0].body, r.callback_body); assert.equal(received[0].token, 'Bearer test-callback-token');
-  assert.equal(received[0].version, '2');
+  assert.equal(received[0].version, '3');
   r.project.callback_url = base + '/redirect';
   assert.equal(await sendCallback(r, new AbortController().signal), 'HTTP 302'); assert.equal(received.length, 2);
   delete r.project.callback_headers;
@@ -57,8 +57,8 @@ test('projects without request tokens admit and query without Authorization; con
   const base = await server(t, handler(f.engine, '/v1', f.transfer));
   assert.equal((await fetch(base+'/v1/tasks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(request())})).status,202);
   await f.cycle();
-  assert.equal((await fetch(base+'/v1/projects/news/tasks/task-1')).status,200);
+  assert.equal((await fetch(base+'/v1/projects/news/conversations/task-1/chats/chat-1')).status,200);
   await f.engine.reconfigure(new Map([['news',{...f.projects.get('news'),request_token:'direct-token'}]]));
-  assert.equal((await fetch(base+'/v1/projects/news/tasks/task-1')).status,401);
-  assert.equal((await fetch(base+'/v1/projects/news/tasks/task-1',{headers:{Authorization:'Bearer direct-token'}})).status,200);
+  assert.equal((await fetch(base+'/v1/projects/news/conversations/task-1/chats/chat-1')).status,401);
+  assert.equal((await fetch(base+'/v1/projects/news/conversations/task-1/chats/chat-1',{headers:{Authorization:'Bearer direct-token'}})).status,200);
 });

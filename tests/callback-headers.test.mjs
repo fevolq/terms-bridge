@@ -66,7 +66,7 @@ test('real callback retries use original multiple headers; no implicit Bearer or
   assert.equal(received.length, 2); assert.deepEqual(received[0].body, received[1].body);
   for (const { headers } of received) {
     assert.equal(headers.authorization, 'Basic original'); assert.equal(headers['x-api-key'], 'old-key'); assert.equal(headers['x-tenant'], 'tenant-a');
-    assert.equal(headers['content-type'], 'application/json'); assert.equal(headers['x-dsh-protocol-version'], '2');
+    assert.equal(headers['content-type'], 'application/json'); assert.equal(headers['x-dsh-protocol-version'], '3');
   }
   f.projects.get('news').callback_headers = {};
   await f.engine.accept(request('empty')); await f.cycle(); await f.cycle();

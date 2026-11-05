@@ -1,7 +1,8 @@
 import type { PERMISSIONS } from '../shared/rules.js';
 
+export interface TaskMetadata { project_id: string; conversation_id: string; chat_id: string }
 export interface TaskRequest {
-  metadata: { project_id: string; task_id: string };
+  metadata: TaskMetadata;
   instruction: string;
   files: { file_id: string }[];
 }
@@ -20,15 +21,19 @@ export interface PluginConfig { api_prefix: string; projects: Record<string, Pro
 export interface ResolvedProject extends Project { workspace_id: string; workspace_path: string }
 export type TaskStatus = 'queued' | 'running' | 'retrying' | 'completed' | 'failed';
 export type DeliveryStatus = 'not_ready' | 'pending' | 'retrying' | 'delivered' | 'failed';
+export interface ConversationRecord {
+  project_id: string; conversation_id: string; session_id: string;
+  workspace_id: string; workspace_path: string; created: boolean; deleted: boolean;
+}
 export interface TaskRecord {
-  request: TaskRequest; fingerprint: string; project: ResolvedProject; status: TaskStatus;
-  files: UploadedFile[]; output_files?: UploadedFile[]; session_deleted?: boolean;
+  request: TaskRequest; project: ResolvedProject; status: TaskStatus;
+  files: UploadedFile[]; output_files?: UploadedFile[];
   execution: {
-    attempts: number; attempt_id: string | null; session_id: string | null;
-    sessions: string[]; session_created: boolean; next_retry_at: string | null; last_error: string | null;
+    attempts: number; attempt_id: string | null; session_id: string;
+    next_retry_at: string | null; last_error: string | null;
   };
   delivery: { status: DeliveryStatus; attempts: number; next_retry_at: string | null; last_error: string | null; in_flight: boolean };
-  ready_at: string; created_at: string; completed_at: string | null; delivered_at: string | null;
+  created_at: string; completed_at: string | null; delivered_at: string | null;
   result?: string; callback_body: string | null;
 }
 export interface Table<T> {
@@ -38,6 +43,8 @@ export interface Table<T> {
   update(key: string, change: (value: T) => T): Promise<T>;
 }
 export interface Result { result: string; files: UploadedFile[] }
-export type Run = (task: TaskRecord, signal: AbortSignal, sessionCreated: () => Promise<void>) => Promise<Result>;
-/** Releasing a concurrency slot is unsafe until the host confirms runner disposal. */
+/** Runtime snapshot; the conversation table alone owns the durable creation marker. */
+export interface SessionLifecycle { created: boolean; ready(): Promise<void> }
+export type Run = (task: TaskRecord, signal: AbortSignal, session: SessionLifecycle) => Promise<Result>;
+/** Releasing a concurrency slot is unsafe until this task's turn and cleanup settle. */
 export class UnsettledExecutionError extends Error {}

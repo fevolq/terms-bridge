@@ -6,8 +6,10 @@ import { LIMITS } from '../shared/rules.js';
 import { FileLibrary } from '../storage/files.js';
 import { generatedName, pathIdentity } from '../storage/paths.js';
 import { prepareOutputDirectory, prepareTaskFiles } from '../storage/task-files.js';
-import type { AgentHandle, ContentBlock, Host } from './host.js';
+import type { ContentBlock, Host } from './host.js';
 import { finalResponse, localResultPaths, presentedFiles, referencedPaths } from './results.js';
+import { openSession } from './sessions.js';
+import { sendTask } from './turn.js';
 
 export function replaceFiles(instruction: string, files: { file_id: string; path: string }[]): string {
   const references = new Map(files.map(file => [file.file_id, file.path]));
@@ -46,10 +48,8 @@ async function collect(host: Host, library: FileLibrary, task: TaskRecord, block
   return files;
 }
 export function makeRunner(host: Host, library = new FileLibrary()): Run {
-  return async (task, signal, sessionCreated = async () => {}) => {
-    let handle: AgentHandle | undefined;
-    const cancel = () => handle?.agent.cancel({ kind: 'hook', reason: 'terms-bridge stopped' });
-    signal.addEventListener('abort', cancel, { once: true });
+  return async (task, signal, session) => {
+    let turn: ReturnType<typeof sendTask> | undefined;
     try {
       signal.throwIfAborted();
       const workspace = await host.workspaceRegistry.create(task.project.workspace_path, task.project.name);
@@ -64,32 +64,20 @@ export function makeRunner(host: Host, library = new FileLibrary()): Run {
           : await host.attachments.saveFileStream({ data: createReadStream(file.path), name: file.filename, signal });
         content.push({ type: image ? 'image' : 'file', attachment });
       }
-      const preset = await host.agentPresets.resolve(task.project.agent_preset);
-      handle = await host.agents.create({ sessionId: task.execution.session_id!, signal,
-        meta: { cwd: workspace.path, agentPreset: preset.id }, agentOptions: { provider: task.project.provider, model: task.project.model },
-        async setup(scope, agent) {
-          await host.agentPresets.mount(scope, preset.id);
-          await scope.plugin({ name: 'terms-bridge-session', inject: ['tools'], apply(context) {
-            if (context.tools.get('ask_user_question', agent)) context.tools.restrict({ deny: ['ask_user_question'] });
-          } }).await();
-        },
-      });
-      // Native creation chooses its own default first; override it before the user turn.
-      host.permissionPresets.set(handle.agent.session, task.project.permission_mode);
-      await workspace.attachSession(handle.agent.id);
+      const agent = await openSession(host, task, signal, session.created);
+      await session.ready();
+      await workspace.attachSession(agent.id);
       signal.throwIfAborted();
-      handle.agent.followup({ id: task.execution.attempt_id!, role: 'user', source: { kind: 'user' }, content });
-      await sessionCreated();
-      await handle.agent.whenIdle();
+      turn = sendTask(host, agent, task, content, signal);
+      const events = await turn.completed;
       signal.throwIfAborted();
-      const events = handle.agent.session.snapshotEvents(), blocks = finalResponse(events);
+      const blocks = finalResponse(events);
       const result = blocks.filter(block => block.type === 'text').map(block => block.text ?? '').join('');
-      // Freeze file contents while the host still owns the completed execution.
+      // Subsequent turns are held at the native execution boundary until close().
       return { result, files: await collect(host, library, task, blocks, presentedFiles(events), signal) };
     } finally {
-      signal.removeEventListener('abort', cancel);
-      try { await handle?.dispose(); }
-      catch (cause) { throw new UnsettledExecutionError('Unable to dispose task session', { cause }); }
+      try { await turn?.close(); }
+      catch (cause) { throw new UnsettledExecutionError('Unable to settle task turn', { cause }); }
     }
   };
 }

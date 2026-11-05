@@ -12,7 +12,7 @@ import { once } from 'node:events';
 import { fixture, listenHttp } from './helpers.mjs';
 import { handler } from '../dist/http/api.js';
 import { sendCallback } from '../dist/http/callback.js';
-import { validateRequest } from '../dist/domain/request.js';
+import { metadataSchema, validateRequest } from '../dist/domain/request.js';
 
 const exec = promisify(execFile);
 const python = process.env.PYTHON ?? 'python';
@@ -24,10 +24,16 @@ const callbackPath = fileURLToPath(new URL('../examples/callback.json', import.m
 test('documented task examples use the current protocol and callback shape', async () => {
   for (const path of [taskPath, fileURLToPath(new URL('../examples/result-file-task.json', import.meta.url))]) validateRequest(JSON.parse(await readFile(path, 'utf8')));
   const callback = JSON.parse(await readFile(callbackPath, 'utf8'));
+  metadataSchema.parse(callback.metadata);
   assert.equal(typeof callback.result, 'string'); assert.deepEqual(callback.files, []);
   const protocol = await readFile(new URL('../docs/usage.md', import.meta.url), 'utf8');
   const blocks = [...protocol.matchAll(/```json\r?\n([\s\S]*?)\r?\n```/g)].map(match => JSON.parse(match[1]));
-  validateRequest(blocks[0]); assert.equal(typeof blocks[1].result, 'string'); assert.equal(blocks[1].files.length, 1);
+  const requests = blocks.filter(body => body.instruction !== undefined);
+  assert.ok(requests.length);
+  for (const body of requests) validateRequest(body);
+  for (const body of blocks.filter(body => body.metadata && body.instruction === undefined)) metadataSchema.parse(body.metadata);
+  const result = blocks.find(body => body.result !== undefined && !body.status);
+  assert.equal(typeof result.result, 'string'); assert.equal(result.files.length, 1);
 });
 
 test('documented Python client and durable callback receiver interoperate with real bridge HTTP', { skip: !pythonAvailable, timeout: 30000 }, async t => {
@@ -71,7 +77,7 @@ test('documented Python client and durable callback receiver interoperate with r
         assert.match(await readFile(files[0].path, 'utf8'), /项目文件接入测试/);
         result = '文件读取完成';
       }
-      if (record.request.metadata.task_id === 'files-001') {
+      if (record.request.metadata.conversation_id === 'files-001') {
         const root = await prepareOutputDirectory(record); await writeFile(join(root, '报告.md'), '# 文件报告\n测试完成。');
         paths.push(join(root, '报告.md')); result = '报告已生成';
       }
@@ -85,40 +91,51 @@ test('documented Python client and durable callback receiver interoperate with r
   const env = { ...process.env, DSH_API_BASE: `http://127.0.0.1:${server.address().port}/api/terms-bridge`, DSH_REQUEST_TOKEN: 'example-request-token', PYTHONIOENCODING: 'utf-8' };
   const client = (...args) => exec(python, [example, ...args], { env, windowsHide: true });
   assert.match((await client('submit', taskPath)).stdout, /HTTP 202/);
-  assert.match((await client('submit', taskPath)).stdout, /"duplicate": true/);
+  await assert.rejects(client('submit', taskPath), error => /HTTP 409/.test(error.stdout) && /CHAT_ALREADY_EXISTS/.test(error.stdout));
   await f.cycle(); await f.cycle();
-  const query = (await client('query', 'news', 'task-001')).stdout;
+  const query = (await client('query', 'news', 'task-001', 'chat-1')).stdout;
   assert.match(query, /"status": "completed"/); assert.match(query, /"status": "delivered"/);
   assert.equal(executions, 1);
 
   const post = (body = callback, token = 'example-callback-token') => fetch(receiver.url, {
-    method: 'POST', headers: { 'Content-Type': 'application/json', 'X-DSH-Protocol-Version': '2', 'X-Project': 'news', Authorization: `Bearer ${token}` }, body: JSON.stringify(body),
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'X-DSH-Protocol-Version': '3', 'X-Project': 'news', Authorization: `Bearer ${token}` }, body: JSON.stringify(body),
   });
   assert.equal((await post(callback, 'wrong')).status, 401);
+  assert.equal((await post({ ...callback, metadata: { project_id: 'news', conversation_id: 'task-001' } })).status, 400);
   assert.equal((await post({ ...callback, metadata: { ...callback.metadata, project_id: 'another-project' } })).status, 403);
   assert.equal((await post({ ...callback, result: 'different' })).status, 409);
   assert.deepEqual(await Promise.all([post(), post(), post()].map(async response => (await response).status)), [204, 204, 204]);
   await stop(receiver.child); receiver = await startReceiver();
   assert.equal((await post()).status, 204);
-  const inspect = await exec(python, ['-c', 'import sqlite3,sys,json; db=sqlite3.connect(sys.argv[1]); rows=db.execute("SELECT payload_json FROM received_results").fetchall(); print(json.dumps(rows)); db.close()', database], { windowsHide: true });
+  const inspect = await exec(python, ['-c', 'import sqlite3,sys,json; db=sqlite3.connect(sys.argv[1]); rows=db.execute("SELECT payload_json FROM received_results_v3").fetchall(); print(json.dumps(rows)); db.close()', database], { windowsHide: true });
   const stored = JSON.parse(inspect.stdout);
   assert.equal(stored.length, 1); assert.deepEqual(JSON.parse(stored[0][0]), callback);
   const uploader = fileURLToPath(new URL('../examples/upload_and_submit.py', import.meta.url));
   f.projects.get('news').callback_url = receiver.url;
+  const nextTask = join(directory, 'next-task.json');
+  await writeFile(nextTask, JSON.stringify({ metadata: { ...callback.metadata, chat_id: 'chat-2' }, instruction: '继续分析。', files: [] }));
+  assert.match((await client('submit', nextTask)).stdout, /HTTP 202/);
+  await f.cycle(); await f.cycle();
+  assert.match((await client('query', 'news', 'task-001', 'chat-2')).stdout, /"status": "delivered"/);
+  assert.equal((await post()).status, 204);
+  const chats = await exec(python, ['-c', 'import sqlite3,sys,json; db=sqlite3.connect(sys.argv[1]); print(json.dumps(db.execute("SELECT chat_id FROM received_results_v3 WHERE project_id=? AND conversation_id=? ORDER BY chat_id", ("news","task-001")).fetchall())); db.close()', database], { windowsHide: true });
+  assert.deepEqual(JSON.parse(chats.stdout), [['chat-1'], ['chat-2']]);
   const attachment = fileURLToPath(new URL('../examples/attachment.txt', import.meta.url));
   const savedTask = join(directory, 'file-task.json');
-  const uploaded = await exec(python, [uploader, 'news', 'python-files', attachment, '--instruction', '阅读附件并总结。', '--out', savedTask], { env, windowsHide: true });
+  const uploaded = await exec(python, [uploader, 'news', attachment, '--conversation-id', 'python-files', '--instruction', '阅读附件并总结。', '--out', savedTask], { env, windowsHide: true });
   assert.match(uploaded.stdout, /HTTP 202/);
+  const uploadedChat = JSON.parse(await readFile(savedTask, 'utf8')).metadata.chat_id;
+  assert.match(uploadedChat, /^[a-f0-9-]{36}$/);
   await f.cycle(); await f.cycle();
-  assert.match((await client('query', 'news', 'python-files')).stdout, /"status": "delivered"/);
-  assert.match((await client('submit', savedTask)).stdout, /"duplicate": true/);
-  assert.equal(executions, 2);
-  const inspectFiles = await exec(python, ['-c', 'import sqlite3,sys; db=sqlite3.connect(sys.argv[1]); print(db.execute("SELECT payload_json FROM received_results WHERE task_id=?", ("python-files",)).fetchone()[0]); db.close()', database], { env, windowsHide: true });
+  assert.match((await client('query', 'news', 'python-files', uploadedChat)).stdout, /"status": "delivered"/);
+  await assert.rejects(client('submit', savedTask), error => /HTTP 409/.test(error.stdout) && /CHAT_ALREADY_EXISTS/.test(error.stdout));
+  assert.equal(executions, 3);
+  const inspectFiles = await exec(python, ['-c', 'import sqlite3,sys; db=sqlite3.connect(sys.argv[1]); print(db.execute("SELECT payload_json FROM received_results_v3 WHERE conversation_id=?", ("python-files",)).fetchone()[0]); db.close()', database], { env, windowsHide: true });
   assert.deepEqual(JSON.parse(inspectFiles.stdout).result, '文件读取完成');
   const resultTaskPath = fileURLToPath(new URL('../examples/result-file-task.json', import.meta.url));
   assert.match((await client('submit', resultTaskPath)).stdout, /HTTP 202/);
   await f.cycle(); await f.cycle();
-  const resultQuery = (await client('query', 'news', 'files-001')).stdout;
+  const resultQuery = (await client('query', 'news', 'files-001', 'chat-1')).stdout;
   const downloadedTask = JSON.parse(resultQuery.slice(resultQuery.indexOf('{')));
   assert.equal(downloadedTask.delivery.status, 'delivered');
   const resultFile = downloadedTask.files[0];

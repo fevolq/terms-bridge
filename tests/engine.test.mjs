@@ -10,23 +10,25 @@ import { recordSchema } from '../dist/storage/tasks.js';
 
 test('concurrent duplicate admission creates one durable task; conflicts cannot overwrite', async () => {
   const f = await fixture();
-  const responses = await Promise.all(Array.from({ length: 12 }, () => f.engine.accept(request())));
-  assert.equal(responses.filter(r => r.status === 202).length, 1);
+  const responses = await Promise.allSettled(Array.from({ length: 12 }, () => f.engine.accept(request())));
+  assert.equal(responses.filter(r => r.status === 'fulfilled' && r.value.status === 202).length, 1);
+  assert.equal(responses.filter(r => r.status === 'rejected' && r.reason.code === 'CHAT_ALREADY_EXISTS').length, 11);
   assert.equal(f.store.list().length, 1);
   const changed = request(); changed.instruction = 'different';
-  await assert.rejects(f.engine.accept(changed), e => e.code === 'TASK_CONFLICT');
+  await assert.rejects(f.engine.accept(changed), e => e.code === 'CHAT_ALREADY_EXISTS');
   assert.equal(f.record().request.instruction, 'Summarize input.');
 });
 
 test('default execution retries create four unique attempts; restart and duplicate requests do not reset exhaustion', async () => {
-  const sessions = [];
-  const f = await fixture({ run: async r => { sessions.push(r.execution.session_id); throw new Error('model failed'); } });
+  const sessions = [], attempts = [];
+  const f = await fixture({ run: async r => { sessions.push(r.execution.session_id); attempts.push(r.execution.attempt_id); throw new Error('model failed'); } });
   await f.engine.accept(request());
   for (let i = 0; i < 4; i++) { await f.cycle(); f.advance(60_000); }
   assert.equal(f.record().status, 'failed');
-  assert.equal(new Set(sessions).size, 4);
+  assert.equal(new Set(sessions).size, 1);
+  assert.equal(new Set(attempts).size, 4);
   assert.equal(f.record().execution.attempts, 4);
-  await f.engine.accept(request()); await f.cycle();
+  await assert.rejects(f.engine.accept(request()), e => e.code === 'CHAT_ALREADY_EXISTS'); await f.cycle();
   const restarted = new TaskEngine(f.store, f.projects, async () => assert.fail('exhausted task ran'), { files: f.files, callback: async () => null });
   await restarted.recover(); restarted.tick(); await restarted.settle();
   assert.equal(f.record().execution.attempts, 4);
@@ -36,6 +38,25 @@ test('zero retries runs exactly once', async () => {
   const f = await fixture({ overrides: { max_execution_retries: 0 } });
   await f.engine.accept(request()); await f.cycle(); f.advance(60_000); await f.cycle();
   assert.equal(f.record().status, 'failed'); assert.equal(f.record().execution.attempts, 1);
+});
+
+test('queued chats and retries keep their due order across recovery', async t => {
+  const calls = [];
+  const f = await fixture({ overrides: { max_concurrency: 1 }, run: async task => {
+    const id = task.request.metadata.conversation_id; calls.push(id);
+    if (id === 'retry' && task.execution.attempts === 1) throw new Error('Retry once');
+    return successRun();
+  } });
+  t.after(() => f.engine.close());
+  await f.engine.accept(request('retry')); await f.cycle();
+  f.advance(59_999); await f.cycle();
+  assert.deepEqual(calls, ['retry']);
+  await f.engine.accept(request('earlier'));
+  f.advance(2); await f.engine.accept(request('later'));
+  await f.engine.recover();
+  for (let i = 0; i < 3; i++) await f.cycle();
+  assert.deepEqual(calls, ['retry', 'earlier', 'retry', 'later']);
+  for (const id of ['retry', 'earlier', 'later']) assert.equal(f.record(id).status, 'completed');
 });
 
 test('callback makes eleven total attempts, at least one minute apart, without re-executing business', async () => {
@@ -50,7 +71,7 @@ test('callback makes eleven total attempts, at least one minute apart, without r
   await f.cycle(); assert.equal(bodies.length, 11); assert.equal(new Set(bodies).size, 1);
   assert.equal(runs, 1); assert.equal(f.record().status, 'completed');
   assert.equal(f.record().delivery.status, 'failed'); assert.equal(f.record().delivery.next_retry_at, null);
-  assert.deepEqual((await f.engine.query('news', 'task-1')).result, 'done');
+  assert.deepEqual((await f.engine.query('news', 'task-1', 'chat-1')).result, 'done');
   recordSchema.parse(f.record());
 });
 
@@ -68,7 +89,7 @@ test('zero or omitted concurrency starts every ready task without waiting for a 
   for (const limit of [0, undefined]) {
     const gate = deferred(); const started = [];
     const f = await fixture({ overrides: { max_concurrency: limit }, run: async record => {
-      started.push(record.request.metadata.task_id); await gate.promise; return successRun();
+      started.push(record.request.metadata.conversation_id); await gate.promise; return successRun();
     } });
     t.after(async () => { gate.resolve(); await f.engine.close(); });
     for (const id of ['a', 'b', 'c', 'd']) await f.engine.accept(request(id));
@@ -85,7 +106,7 @@ test('positive concurrency queues excess tasks in submission order as slots beco
   const ids = ['z', 'a', 'y', 'b']; const gates = new Map(ids.map(id => [id, deferred()]));
   const started = []; let running = 0, peak = 0;
   const f = await fixture({ overrides: { max_concurrency: 2 }, run: async record => {
-    const id = record.request.metadata.task_id;
+    const id = record.request.metadata.conversation_id;
     started.push(id); running++; peak = Math.max(peak, running);
     await gates.get(id).promise; running--; return successRun();
   } });
@@ -109,12 +130,12 @@ test('failed durable admission never acknowledges success', async () => {
 
 test('persisted interrupted final attempts fail without receiving extra retry budget', async () => {
   const f = await fixture({ overrides: { max_execution_retries: 0 } }); await f.engine.accept(request());
-  await f.store.update(taskKey('news', 'task-1'), r => ({ ...r, status: 'running', execution: {
-    ...r.execution, attempts: 1, attempt_id: 'old', session_id: 'old-session', sessions: ['old-session'],
+  await f.store.update(taskKey('news', 'task-1', 'chat-1'), r => ({ ...r, status: 'running', execution: {
+    ...r.execution, attempts: 1, attempt_id: 'old',
   } }));
   await f.engine.recover(); assert.equal(f.record().status, 'failed');
   const g = await fixture({ run: successRun }); await g.engine.accept(request()); await g.cycle();
-  await g.store.update(taskKey('news', 'task-1'), r => ({ ...r, delivery: { ...r.delivery, attempts: 11, in_flight: true } }));
+  await g.store.update(taskKey('news', 'task-1', 'chat-1'), r => ({ ...r, delivery: { ...r.delivery, attempts: 11, in_flight: true } }));
   await g.engine.recover(); assert.equal(g.record().delivery.status, 'failed'); assert.equal(g.record().status, 'completed');
 });
 

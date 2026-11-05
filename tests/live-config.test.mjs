@@ -7,7 +7,7 @@ import { fixture, request, deferred, until } from './helpers.mjs';
 test('concurrency switches between limited and unlimited without interrupting running tasks', async t => {
   const gates = new Map(['a', 'b', 'c', 'd'].map(id => [id, deferred()])); const started = [];
   const f = await fixture({ overrides: { max_concurrency: 1 }, run: async (record, signal) => {
-    const id = record.request.metadata.task_id; started.push({ id, signal });
+    const id = record.request.metadata.conversation_id; started.push({ id, signal });
     await gates.get(id).promise; return { result: id, files: [] };
   } });
   t.after(async () => { for (const gate of gates.values()) gate.resolve(); await f.engine.close(); });
@@ -32,7 +32,7 @@ test('adding and updating projects keeps active sessions, queued snapshots, call
   const gate = deferred(); const started = []; const deliveries = [];
   const f = await fixture({ overrides: { max_concurrency: 1, callback_headers: { Authorization: 'Bearer original-callback-token' } }, run: async (record, signal) => {
     started.push({ record, signal });
-    if (record.request.metadata.task_id === 'running') await gate.promise;
+    if (record.request.metadata.conversation_id === 'running') await gate.promise;
     return { result: record.project.model, files: [] };
   }, callback: async record => { deliveries.push(record); return null; } });
   await f.engine.accept(request('running')); await f.engine.accept(request('queued'));
@@ -54,11 +54,11 @@ test('adding and updating projects keeps active sessions, queued snapshots, call
   gate.resolve(); await f.engine.settle();
   for (let i = 0; i < 5; i++) await f.cycle();
   assert.equal(f.record('running').status, 'completed');
-  assert.equal(deliveries.find(r => r.request.metadata.task_id === 'running').project.callback_url, old.callback_url);
-  assert.equal(deliveries.find(r => r.request.metadata.task_id === 'queued').project.model, old.model);
-  assert.equal(deliveries.find(r => r.request.metadata.task_id === 'new').project.callback_url, 'https://new.example/results');
-  assert.equal(deliveries.find(r => r.request.metadata.task_id === 'running').project.callback_headers.Authorization, 'Bearer original-callback-token');
-  assert.equal(deliveries.find(r => r.request.metadata.task_id === 'new').project.callback_headers.Authorization, 'Bearer new-callback-token');
+  assert.equal(deliveries.find(r => r.request.metadata.conversation_id === 'running').project.callback_url, old.callback_url);
+  assert.equal(deliveries.find(r => r.request.metadata.conversation_id === 'queued').project.model, old.model);
+  assert.equal(deliveries.find(r => r.request.metadata.conversation_id === 'new').project.callback_url, 'https://new.example/results');
+  assert.equal(deliveries.find(r => r.request.metadata.conversation_id === 'running').project.callback_headers.Authorization, 'Bearer original-callback-token');
+  assert.equal(deliveries.find(r => r.request.metadata.conversation_id === 'new').project.callback_headers.Authorization, 'Bearer new-callback-token');
   await f.engine.close();
 });
 

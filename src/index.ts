@@ -1,6 +1,8 @@
 import { ApiError } from './domain/request.js';
 import { Config, readConfig, watchProjectConfig } from './dsh/settings.js';
 import { makeRunner } from './dsh/runner.js';
+import { agentBusy } from './dsh/sessions.js';
+import { sessionModels } from './dsh/models.js';
 import { exposeWorkspaces } from './dsh/workspaces.js';
 import type { Host } from './dsh/host.js';
 import { parseConfig } from './projects/config.js';
@@ -15,14 +17,15 @@ import { sendCallback } from './http/callback.js';
 
 export { Config };
 export const name = 'terms-bridge';
-export const inject = ['webServer', 'agents', 'agentPresets', 'permissionPresets', 'workspaceRegistry', 'storageDomain', 'sessionPersistence', 'attachments', 'typert'];
+export const inject = ['webServer', 'agents', 'sessionController', 'permissionPresets', 'workspaceRegistry', 'storageDomain', 'sessionPersistence', 'sessionProjections', 'attachments', 'typert'];
 export async function apply(host: Host, raw: unknown): Promise<void> {
-  const required = [host.webServer?.register, host.agents?.create, host.agentPresets?.resolve, host.agentPresets?.mount,
-    host.permissionPresets?.set, host.workspaceRegistry?.list, host.workspaceRegistry?.create, host.sessionPersistence?.stat,
+  const required = [host.webServer?.register, host.agents?.get, host.sessionController?.create, host.sessionController?.resolveAgent,
+    host.permissionPresets?.set, host.workspaceRegistry?.list, host.workspaceRegistry?.create, host.sessionPersistence?.stat, host.sessionProjections?.stateOf,
     host.attachments?.saveImage, host.attachments?.saveFileStream, host.attachments?.fileHostPath, host.attachments?.imageHostPath, host.storageDomain?.open, host.effect];
   if (required.some(value => typeof value !== 'function')) throw new Error('Incompatible dsh public services for terms-bridge');
+  sessionModels(host);
   const initial = parseConfig(readConfig(raw)), log = host.logger?.(name);
-  const domain = await host.storageDomain.open(domainSpec), store = new TaskStore(domain.table('tasks'));
+  const domain = await host.storageDomain.open(domainSpec), store = new TaskStore(domain.table('tasks'), domain.table('conversations'));
   const library = new FileLibrary(), transfer = new FileTransfer(library);
   let tasks: TaskEngine | undefined, live: LiveConfig | undefined, timer: ReturnType<typeof setInterval> | undefined;
   let route: (() => void) | undefined, guard: (() => void) | undefined, notice: (() => void) | undefined, closed = false;
@@ -41,6 +44,7 @@ export async function apply(host: Host, raw: unknown): Promise<void> {
     tasks = new TaskEngine(store, projects, makeRunner(host, library), {
       files: library, callback: sendCallback, log: text => log?.error(text),
       sessionExists: async id => (await host.sessionPersistence.stat(id)) !== undefined,
+      sessionBusy: id => agentBusy(host.agents.get(id)),
     });
     await tasks.recover();
     if (closed) throw new Error('Plugin closed during initialization');

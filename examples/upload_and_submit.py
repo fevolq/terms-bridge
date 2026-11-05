@@ -1,6 +1,6 @@
 """Upload project files, save an immutable task JSON, and submit it (Python 3.10+, stdlib).
 
-Use project_client.py submit with the saved JSON if the task response is lost.
+Use project_client.py query with the saved IDs if the task response is lost.
 Uploads are scoped only to project_id; returned file_id values can be reused.
 """
 import argparse
@@ -13,7 +13,7 @@ import sys
 from urllib.parse import quote, urlsplit
 from uuid import uuid4
 
-from project_client import PROJECT_ID, TASK_ID, canonical, request_bridge, token
+from project_client import PROJECT_ID, CONVERSATION_ID, CHAT_ID, canonical, request_bridge, token
 
 
 def upload_file(project_id, path):
@@ -66,22 +66,25 @@ def upload_file(project_id, path):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("project_id")
-    parser.add_argument("task_id")
     parser.add_argument("files", nargs="+")
+    parser.add_argument("--conversation-id", default=None, help="Existing or new conversation; generated if omitted")
+    parser.add_argument("--chat-id", default=None, help="New chat ID; generated if omitted")
     parser.add_argument("--instruction", required=True, help="Complete dsh user prompt")
     parser.add_argument("--out", required=True, help="New task JSON path; never overwrite an earlier submission")
     args = parser.parse_args()
-    if not PROJECT_ID.fullmatch(args.project_id) or not TASK_ID.fullmatch(args.task_id):
-        raise ValueError("Invalid project_id or task_id")
+    conversation_id = args.conversation_id if args.conversation_id is not None else str(uuid4())
+    chat_id = args.chat_id if args.chat_id is not None else str(uuid4())
+    if not PROJECT_ID.fullmatch(args.project_id) or not CONVERSATION_ID.fullmatch(conversation_id) or not CHAT_ID.fullmatch(chat_id):
+        raise ValueError("Invalid project_id, conversation_id or chat_id")
     output = Path(args.out)
     if output.exists():
-        raise ValueError("Task JSON already exists. Retry with: python project_client.py submit <saved-task.json>")
+        raise ValueError("Task JSON already exists. Query its saved IDs before resubmitting; accepted chats return 409.")
     paths = [Path(name) for name in args.files]
     if len(paths) > 20 or any(not p.is_file() or p.stat().st_size > 50 * 1024 * 1024 for p in paths) or sum(p.stat().st_size for p in paths) > 200 * 1024 * 1024:
         raise ValueError("Use 1-20 regular files, at most 50 MiB each and 200 MiB total")
     files = [upload_file(args.project_id, p) for p in paths]
     task = {
-        "metadata": {"project_id": args.project_id, "task_id": args.task_id},
+        "metadata": {"project_id": args.project_id, "conversation_id": conversation_id, "chat_id": chat_id},
         "instruction": args.instruction,
         "files": [{"file_id": file["file_id"]} for file in files],
     }

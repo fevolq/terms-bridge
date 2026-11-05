@@ -25,7 +25,7 @@ test('real profile editor permits repeated names, blocks repeated paths and pres
  export const bindings = new Map();
  export function apply(ctx){
    const workspaceRegistry={list:()=>${JSON.stringify([{id:'default',path:defaultWorkspace,title:'default-workspace'},{id:'taken',path:taken,title:'占用名称'}])}};
-   ctx.effect(()=>watchProjectConfig({fiber:ctx.fiber,on:ctx.on.bind(ctx),workspaceRegistry},bindings,new TaskStore(new MemoryTable())));
+   ctx.effect(()=>watchProjectConfig({fiber:ctx.fiber,on:ctx.on.bind(ctx),workspaceRegistry},bindings,new TaskStore(new MemoryTable(), new MemoryTable())));
  }`);
  await writeFile(join(dir,'other.mjs'),`import Schema from '${pathToFileURL(requireHost.resolve('@deepseek-ai/schemastery'))}';export const Config=Schema.object({enabled:Schema.boolean().default(false).volatile()});export function apply(){}`);
  const patches=[{insert:[{id:'terms-bridge',name:pathToFileURL(join(dir,'bridge.mjs')).href},{id:'other-plugin',name:pathToFileURL(join(dir,'other.mjs')).href},...['dsh-config-editor','dsh-settings'].map(name=>({id:name,name:pathToFileURL(requireHost.resolve('@deepseek-ai/'+name)).href}))]}];

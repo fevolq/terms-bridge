@@ -2,12 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { queued, beginExecution, executionFailed, completed, beginDelivery, deliveryFinished } from '../dist/domain/task.js';
 import { recordSchema } from '../dist/storage/tasks.js';
-import { request, project } from './helpers.mjs';
+import { request, project, conversation } from './helpers.mjs';
 
 const now = Date.parse('2026-11-02T08:00:00Z');
-test('state transitions retain the admission snapshot and exhaust retries with distinct sessions', () => {
+test('state transitions retain the admission snapshot and exhaust retries in the same session', () => {
   const input = request(), config = project({ max_execution_retries: 1 });
-  let task = queued(input, config, [], now);
+  let task = queued(input, config, [], now, conversation());
   input.instruction = 'changed'; config.max_execution_retries = 10;
   assert.equal(task.project.max_execution_retries, 1);
   assert.equal(task.request.instruction, 'Summarize input.');
@@ -20,12 +20,12 @@ test('state transitions retain the admission snapshot and exhaust retries with d
     task = executionFailed(task, task.execution.attempt_id, 'EXECUTION_ERROR', now); recordSchema.parse(task);
     assert.equal(task.status, attempt === 1 ? 'retrying' : 'failed');
   }
-  assert.equal(new Set(history).size, 2);
+  assert.equal(new Set(history).size, 1);
   assert.throws(() => beginExecution(task), /not runnable/);
 });
 
 test('callback retries retain the exact final text and never alter execution attempts', () => {
-  let task = beginExecution(queued(request(), project(), [], now));
+  let task = beginExecution(queued(request(), project(), [], now, conversation()));
   const text = '原文\n\n[结果](a.png)  ';
   task = completed(task, task.execution.attempt_id, { result: text, files: [] }, now);
   const body = task.callback_body;

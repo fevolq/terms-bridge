@@ -6,7 +6,8 @@ import { FileLibrary } from './files.js';
 import { copyBytes, directory, FILE_ROOT } from './paths.js';
 
 function attemptPath(task: TaskRecord): string[] {
-  return [FILE_ROOT, 'tasks', taskKey(task.request.metadata.project_id, task.request.metadata.task_id), task.execution.attempt_id!];
+  const { project_id, conversation_id, chat_id } = task.request.metadata;
+  return [FILE_ROOT, 'tasks', taskKey(project_id, conversation_id, chat_id), task.execution.attempt_id!];
 }
 export function prepareOutputDirectory(task: TaskRecord): Promise<string> {
   return directory(task.project.workspace_path, [...attemptPath(task), 'outputs'], true);

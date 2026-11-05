@@ -2,7 +2,9 @@
 export const API_PREFIX = '/api/terms-bridge';
 export const API_PATTERN = /^\/[A-Za-z0-9_/-]+[A-Za-z0-9_-]$/;
 export const PROJECT_ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
-export const TASK_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+export const CONVERSATION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+export const CHAT_ID = CONVERSATION_ID;
+export const PROTOCOL_VERSION = '3';
 export const FILE_ID = /^file_[a-f0-9]{32}$/;
 export const TOKEN_PATTERN = /^[\x21-\x7e]*$/;
 export const PERMISSIONS = ['read-only', 'workspace-write', 'auto', 'danger-full-access'] as const;

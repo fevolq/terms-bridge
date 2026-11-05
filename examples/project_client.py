@@ -18,7 +18,8 @@ from urllib.parse import quote, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 PROJECT_ID = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}\Z")
-TASK_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
+CONVERSATION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
+CHAT_ID = CONVERSATION_ID
 CALLBACK_LIMIT = 2 * 1024 * 1024  # result plus the metadata envelope
 
 
@@ -69,7 +70,7 @@ def request_bridge(method, path, payload=None):
     except HTTPError as error:
         status, raw = error.code, error.read()
     except (URLError, TimeoutError) as error:
-        print(f"Request outcome is uncertain ({type(error).__name__}). Retry the SAME saved task JSON/ID or query it.", file=sys.stderr)
+        print(f"Request outcome is uncertain ({type(error).__name__}). Query the saved IDs first; resubmission of an accepted chat returns 409. Omitted IDs cannot be recovered from a lost response.", file=sys.stderr)
         return 1
     print("HTTP", status)
     try:
@@ -87,10 +88,10 @@ def make_receiver(database, project_id, callback_headers):
     Path(database).parent.mkdir(parents=True, exist_ok=True)
     with closing(sqlite3.connect(database)) as db, db:
         db.execute("PRAGMA synchronous=FULL")
-        db.execute("""CREATE TABLE IF NOT EXISTS received_results (
-            project_id TEXT NOT NULL, task_id TEXT NOT NULL, payload_json TEXT NOT NULL,
+        db.execute("""CREATE TABLE IF NOT EXISTS received_results_v3 (
+            project_id TEXT NOT NULL, conversation_id TEXT NOT NULL, chat_id TEXT NOT NULL, payload_json TEXT NOT NULL,
             received_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
-            PRIMARY KEY (project_id, task_id)
+            PRIMARY KEY (project_id, conversation_id, chat_id)
         )""")
 
     class Receiver(BaseHTTPRequestHandler):
@@ -115,7 +116,7 @@ def make_receiver(database, project_id, callback_headers):
                 if len(received) != 1 or not hmac.compare_digest(received[0].encode('utf-8'), value.encode('utf-8')):
                     self.reply(401)
                     return
-            if self.headers.get("X-DSH-Protocol-Version") != "2":
+            if self.headers.get("X-DSH-Protocol-Version") != "3":
                 self.reply(400)
                 return
             if self.headers.get_content_type() != "application/json":
@@ -139,14 +140,16 @@ def make_receiver(database, project_id, callback_headers):
                 if not isinstance(body, dict) or set(body) != {"metadata", "result", "files"}:
                     raise ValueError("Invalid callback envelope")
                 metadata = body["metadata"]
-                if not isinstance(metadata, dict) or set(metadata) != {"project_id", "task_id"}:
+                if not isinstance(metadata, dict) or set(metadata) != {"project_id", "conversation_id", "chat_id"}:
                     raise ValueError("Invalid metadata")
                 if metadata.get("project_id") != project_id:
                     self.reply(403)
                     return
-                task_id = metadata.get("task_id")
-                if not isinstance(task_id, str) or not TASK_ID.fullmatch(task_id):
-                    raise ValueError("Invalid task ID")
+                conversation_id, chat_id = metadata["conversation_id"], metadata["chat_id"]
+                if not isinstance(conversation_id, str) or not CONVERSATION_ID.fullmatch(conversation_id):
+                    raise ValueError("Invalid conversation ID")
+                if not isinstance(chat_id, str) or not CHAT_ID.fullmatch(chat_id):
+                    raise ValueError("Invalid chat ID")
                 if not isinstance(body["result"], str) or not isinstance(body["files"], list):
                     raise ValueError("Invalid result or files")
                 payload = canonical(body)
@@ -161,12 +164,12 @@ def make_receiver(database, project_id, callback_headers):
                 with closing(sqlite3.connect(database, timeout=5)) as db, db:
                     db.execute("PRAGMA synchronous=FULL")
                     db.execute("BEGIN IMMEDIATE")
-                    old = db.execute("SELECT payload_json FROM received_results WHERE project_id=? AND task_id=?", (project_id, task_id)).fetchone()
+                    old = db.execute("SELECT payload_json FROM received_results_v3 WHERE project_id=? AND conversation_id=? AND chat_id=?", (project_id, conversation_id, chat_id)).fetchone()
                     if old is not None and old[0] != payload:
                         self.reply(409)  # Never overwrite a committed result.
                         return
                     if old is None:
-                        db.execute("INSERT INTO received_results(project_id,task_id,payload_json) VALUES (?,?,?)", (project_id, task_id, payload))
+                        db.execute("INSERT INTO received_results_v3(project_id,conversation_id,chat_id,payload_json) VALUES (?,?,?,?)", (project_id, conversation_id, chat_id, payload))
                 # The transaction is committed before acknowledging delivery.
             except sqlite3.Error:
                 self.reply(503)
@@ -180,10 +183,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     submit = commands.add_parser("submit")
-    submit.add_argument("file", help="Saved task JSON; reuse the same file for retries")
+    submit.add_argument("file", help="Saved task JSON; an already accepted chat returns 409")
     query = commands.add_parser("query")
     query.add_argument("project_id")
-    query.add_argument("task_id")
+    query.add_argument("conversation_id")
+    query.add_argument("chat_id")
     serve = commands.add_parser("serve")
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8081)
@@ -195,9 +199,9 @@ def main():
     if not PROJECT_ID.fullmatch(args.project_id):
         raise ValueError("Invalid project_id")
     if args.command == "query":
-        if not TASK_ID.fullmatch(args.task_id):
-            raise ValueError("Invalid task_id")
-        return request_bridge("GET", f"/projects/{quote(args.project_id, safe='')}/tasks/{quote(args.task_id, safe='')}")
+        if not CONVERSATION_ID.fullmatch(args.conversation_id) or not CHAT_ID.fullmatch(args.chat_id):
+            raise ValueError("Invalid conversation_id or chat_id")
+        return request_bridge("GET", f"/projects/{quote(args.project_id, safe='')}/conversations/{quote(args.conversation_id, safe='')}/chats/{quote(args.chat_id, safe='')}")
     receiver = make_receiver(args.db, args.project_id, parse_json(os.environ.get("DSH_CALLBACK_HEADERS", "{}")))
     server = ThreadingHTTPServer((args.host, args.port), receiver)
     print(f"Callback receiver: http://{args.host}:{server.server_port}/api/dsh/results", flush=True)

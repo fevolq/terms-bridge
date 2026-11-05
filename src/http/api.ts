@@ -1,7 +1,7 @@
 import { timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { ApiError } from '../domain/request.js';
-import { FILE_ID, LIMITS, PROJECT_ID, TASK_ID } from '../shared/rules.js';
+import { CHAT_ID, CONVERSATION_ID, FILE_ID, LIMITS, PROJECT_ID } from '../shared/rules.js';
 import type { TaskEngine } from '../services/tasks.js';
 import type { FileTransfer } from './files.js';
 
@@ -67,15 +67,20 @@ export function handler(tasks: TaskEngine, prefix: string, files: FileTransfer, 
         res.setHeader('Location', prefix + result.location);
         respond(res, result.status, result.body); return;
       }
-      const route = pathname.startsWith(prefix + '/') ? /^\/projects\/([^/]+)\/(files|tasks)(?:\/([^/]+))?$/.exec(pathname.slice(prefix.length)) : null;
+      const path = pathname.startsWith(prefix + '/') ? pathname.slice(prefix.length) : '';
+      const chat = /^\/projects\/([^/]+)\/conversations\/([^/]+)\/chats\/([^/]+)$/.exec(path);
+      if (chat) {
+        method(req, res, 'GET');
+        const id = identity(chat[1]!, PROJECT_ID); authorize(req, id);
+        respond(res, 200, await tasks.track(tasks.query(id, identity(chat[2]!, CONVERSATION_ID), identity(chat[3]!, CHAT_ID))));
+        return;
+      }
+      const route = /^\/projects\/([^/]+)\/files(?:\/([^/]+))?$/.exec(path);
       if (!route) throw new ApiError(404, 'NOT_FOUND', 'Unknown task bridge route');
-      const [, rawId, resource, rawKey] = route;
-      if (resource === 'tasks' && !rawKey) throw new ApiError(404, 'NOT_FOUND', 'Unknown task bridge route');
+      const [, rawId, rawKey] = route;
       method(req, res, rawKey ? 'GET' : 'POST');
       const id = identity(rawId!, PROJECT_ID), project = authorize(req, id);
-      if (resource === 'tasks') {
-        respond(res, 200, await tasks.query(id, identity(rawKey!, TASK_ID)));
-      } else if (rawKey) {
+      if (rawKey) {
         await tasks.track(files.download(id, project, identity(rawKey, FILE_ID), res, tasks.stop.signal));
       } else {
         respond(res, 201, await tasks.track(files.upload(req, id, project, tasks.stop.signal), true));
@@ -84,7 +89,7 @@ export function handler(tasks: TaskEngine, prefix: string, files: FileTransfer, 
       req.resume();
       if (res.headersSent) { res.destroy(); return; }
       const failure = error instanceof ApiError ? error : new ApiError(503, 'SERVICE_UNAVAILABLE', 'Task service unavailable');
-      respond(res, failure.status, { error: { code: failure.code, message: failure.message } });
+      respond(res, failure.status, { ...(failure.metadata ? { metadata: failure.metadata } : {}), error: { code: failure.code, message: failure.message } });
     }
   };
 }

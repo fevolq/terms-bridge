@@ -13,7 +13,7 @@ test('request accepts only metadata IDs, instruction and files; no old protocol'
     const invalid = structuredClone(value); delete invalid[field]; assert.throws(() => validateRequest(invalid));
   }
   for (const instruction of ['', '  ', 'x'.repeat(32769), 1]) assert.throws(() => validateRequest({ ...value, instruction }));
-  for (const metadata of [{ project_id: '../x', task_id: 'ok' }, { project_id: 'news', task_id: '../x' }]) assert.throws(() => validateRequest({ ...value, metadata }));
+  for (const metadata of [{ project_id: '../x', conversation_id: 'ok' }, { project_id: 'news', conversation_id: '../x' }]) assert.throws(() => validateRequest({ ...value, metadata }));
 });
 
 test('file references are ordered, bounded and unique', () => {

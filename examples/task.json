@@ -1,7 +1,8 @@
 {
   "metadata": {
     "project_id": "news",
-    "task_id": "task-001"
+    "conversation_id": "task-001",
+    "chat_id": "chat-1"
   },
   "instruction": "请根据你的判断总结这项任务。",
   "files": []

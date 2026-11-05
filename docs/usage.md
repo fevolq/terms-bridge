@@ -1,12 +1,14 @@
 # terms-bridge 使用说明
 
+本文对应 `0.2.0`、HTTP/回调协议 v3。此版本不兼容旧接口及旧任务数据，升级前应在旧版本中处理完已有任务；升级保留原有文件和 dsh 会话，不迁移旧任务。
+
 ## 安装插件
 
 需要 Node.js 22+；dsh 已验证版本为 `0.2.1-rc.2`。
 
 ### 从 npm 安装（推荐）
 
-插件已发布到 [npm](https://www.npmjs.com/package/@fevolq/terms-bridge)，日常安装和更新优先使用此方式。以下命令使用 Web profile，请将 `web` 替换为实际使用的 profile：
+从 [npm](https://www.npmjs.com/package/@fevolq/terms-bridge) 安装已发布的版本。以下命令使用 Web profile，请将 `web` 替换为实际使用的 profile：
 
 ```powershell
 dsh plugin --profile web add @fevolq/terms-bridge
@@ -18,18 +20,14 @@ dsh plugin --profile web add @fevolq/terms-bridge
 dsh plugin --profile web update @fevolq/terms-bridge --latest
 ```
 
-需要固定版本时，例如安装 `0.1.0`：
-
-```powershell
-dsh plugin --profile web add @fevolq/terms-bridge@0.1.0
-```
+需要固定版本时，在包名后添加 `@` 和已发布的版本号；安装当前源码时按下方步骤构建本地安装包。
 
 ### 从本地安装包安装
 
 已取得构建好的 `.tgz` 包时，在安装包所在目录执行：
 
 ```powershell
-dsh plugin --profile web add ./fevolq-terms-bridge-0.1.0.tgz --ignore-scripts
+dsh plugin --profile web add ./fevolq-terms-bridge-0.2.0.tgz --ignore-scripts
 ```
 
 ### 从源码构建
@@ -42,7 +40,7 @@ npm test
 npm pack
 ```
 
-`npm ci` 按锁文件安装依赖；`npm test` 构建并运行测试；`npm pack` 重新构建并生成 `fevolq-terms-bridge-0.1.0.tgz`，然后按上面的本地安装包方式安装。安装包包含运行所需依赖，可复制到其他机器安装。
+`npm ci` 按锁文件安装依赖；`npm test` 构建并运行测试；`npm pack` 重新构建并生成 `fevolq-terms-bridge-0.2.0.tgz`，然后按上面的本地安装包方式安装。安装包包含运行所需依赖，可复制到其他机器安装。
 
 源码目录：`src/` 为插件后端，`client/` 为设置页面，`tests/` 为测试，`examples/` 为项目接入示例，`scripts/` 为构建脚本。`dist/`、`node_modules/` 和打包产物不提交到 Git。
 
@@ -53,6 +51,28 @@ npm pack
 安装或升级插件后，重新加载插件或重启对应的 dsh 实例。每个 profile 只启用一个 terms-bridge 实例。
 
 示例使用项目 ID `news`、dsh 地址 `http://127.0.0.1:3080`、项目服务地址 `http://127.0.0.1:8001`。跨机器使用时替换为双方实际可访问的地址。
+
+## 会话与对话标识
+
+| metadata 字段 | 用途 | 提交任务时 |
+| --- | --- | --- |
+| `project_id` | 定位已配置的项目及工作区 | 必填 |
+| `conversation_id` | 定位该项目内的原生 dsh 会话 | 可省略，由插件生成 UUID |
+| `chat_id` | 定位该会话内的当次对话任务 | 可省略，由插件生成 UUID |
+
+两个可选 ID 独立生成。提交响应、状态查询和回调中的 metadata 始终包含这三个字段。文件接口只按项目和文件 ID 定位，不携带会话 metadata。
+
+续聊时复用 `project_id + conversation_id`，指定新的 `chat_id`（或省略让插件生成），只提交本次提示词和附件。插件只负责定位并续接会话；上下文完全由 dsh 管理，不拼接历史、不回滚失败尝试，也不维护轮次列表。
+
+- 同会话的上一项任务处于 `queued`、`running` 或 `retrying` 时，新对话返回 `409 / CONVERSATION_BUSY`，不会进入队列。等待其 `completed` 或 `failed` 后再提交。
+- 同一三元组已被受理后，再次提交始终返回 `409 / CHAT_ALREADY_EXISTS`，不比较内容，也不重新执行。这项检查优先于会话忙碌或删除检查。
+- 执行内部重试始终使用相同的三个 ID 和同一个原生会话。本次回复及结果文件保存完成后为 `completed`，重试耗尽为 `failed`；任务结束后可在会话空闲时提交下一次对话。回调及回调重试独立运行。
+- 不同会话可以并行，受项目最大执行并发限制。同名 conversation_id 在不同项目中互不影响。
+- 打开 dsh 会话历史不影响续聊。若会话正在从 dsh 界面执行对话或有排队对话，新任务同样返回 `409 / CONVERSATION_BUSY`；原生待处理上下文不算未结束的对话，由 dsh 自行消费。
+- 会话创建后沿用原生记录中的 Agent 预设，后续对话和重试均继承该预设；修改项目预设只影响新建会话。
+- 原生会话删除后，新的 chat_id 返回 `404 / SESSION_NOT_FOUND`，不会用同一 conversation_id 重建会话。
+
+如果需要处理提交超时或响应丢失，建议调用方提前生成并保存两个 ID：先查询该三元组，再决定是否重发。重发已受理的任务会收到 409，可继续查询。如果省略 ID 且响应丢失，客户端无法靠原请求恢复插件生成的 ID；重新省略 ID 提交可能创建新任务。
 
 ## 1. 在 dsh 中新增项目
 
@@ -75,7 +95,7 @@ npm pack
 
 工作区路径留空时，使用 dsh 默认工作区同级目录下以项目 ID 命名的文件夹，不存在时自动创建；手动填写时使用已有目录。保存后，页面显示项目实际使用的完整路径。
 
-项目 ID 和工作区路径保存后不可修改。已有任务（含排队及重试任务）沿用接收时的模型、预设、权限、回调和重试配置；并发限额使用当前配置，在「并发与超时」中调整。
+项目 ID 和工作区路径保存后不可修改。已有任务（含排队及重试任务）沿用接收时的模型、权限、回调和重试配置；Agent 预设仅在首次创建会话时选定，后续任务始终继承会话原有预设。并发限额使用当前配置，在「并发与超时」中调整。
 
 移除项目要执行 **移除项目 → 确认移除 → 保存配置**，有未完成任务时保存会被拒绝。工作区、文件和会话均保留。
 
@@ -90,68 +110,19 @@ npm pack
 - 自动审查需要 dsh 提供对应权限预设；不可用时任务失败，不自动放宽权限。人工审批仍遵循 dsh 的权限机制。
 - 会话权限仍受操作系统的文件权限限制。
 
-## 2. 项目实现回调和结果下载
+## 2. 接收结果回调
 
-下面是可独立运行的最小接收端。安装 `fastapi uvicorn httpx`，保存为 `receiver.py`：
-
-```python
-from pathlib import Path
-import re
-
-import httpx
-from fastapi import FastAPI, HTTPException, Request
-
-app = FastAPI()
-API = "http://127.0.0.1:3080/api/terms-bridge"
-PROJECT_ID = "news"
-OUTPUT = Path(__file__).resolve().parent / "downloads"
-
-# 请求插件时使用。只有在项目设置了请求令牌时才需要填写。
-REQUEST_HEADERS = {}  # 例如 {"Authorization": "Bearer example-request-token"}
-# 与插件的“回调请求头（JSON）”保持一致；默认不校验自定义请求头。
-CALLBACK_HEADERS = {}  # 例如 {"X-Bridge-Key": "example-callback-key"}
-
-
-@app.post("/api/dsh/results")
-async def webhook(payload: dict, request: Request):
-    for name, value in CALLBACK_HEADERS.items():
-        if request.headers.get(name) != value:
-            raise HTTPException(401, "回调请求头不匹配")
-    if payload["metadata"]["project_id"] != PROJECT_ID:
-        raise HTTPException(404, "项目不匹配")
-
-    print("任务：", payload["metadata"]["task_id"])
-    print("最终回复：", payload["result"])
-    OUTPUT.mkdir(parents=True, exist_ok=True)
-    async with httpx.AsyncClient(timeout=120) as client:
-        for file in payload["files"]:
-            file_id = file["file_id"]
-            if not re.fullmatch(r"file_[a-f0-9]{32}", file_id):
-                raise HTTPException(400, "无效的 file_id")
-            response = await client.get(
-                f"{API}/projects/{PROJECT_ID}/files/{file_id}",
-                headers=REQUEST_HEADERS,
-            )
-            response.raise_for_status()
-            suffix = Path(file["filename"]).suffix.lower()
-            if not re.fullmatch(r"\.[a-z0-9]{1,16}", suffix):
-                suffix = ""
-            target = OUTPUT / (file_id + suffix)
-            target.write_bytes(response.content)
-            print("已保存：", target)
-    return {"ok": True}
-```
-
-在接收端目录执行：
+在仓库根目录运行标准库接收示例，需要 Python 3.10+：
 
 ```powershell
-python -m pip install fastapi uvicorn httpx
-python -m uvicorn receiver:app --host 127.0.0.1 --port 8001
+# 若插件配置了自定义回调头，填写相同的 JSON：
+# $env:DSH_CALLBACK_HEADERS = '{"X-Bridge-Key":"example-callback-key"}'
+python examples/project_client.py serve --project-id news --port 8001
 ```
 
-需要供另一台机器访问时，改成相应的监听地址，并将 dsh 中的回调地址改为可访问的地址。
+将项目回调地址设为 `http://127.0.0.1:8001/api/dsh/results`。跨机器使用时，通过 `--host` 指定监听地址，并配置双方可访问的地址。
 
-该接收端在全部文件下载并保存后才返回 200；下载异常会返回非 2xx，由插件重试。重复回调使用相同文件 ID，覆盖同一份文件。`files: []` 时只处理文本，仍正常返回成功。若一次回调耗时超过默认 10 秒，在项目配置中增加「单次回调超时」。
+接收端按三个 ID 将回调 JSON 保存到 SQLite，事务提交后返回 204，重复回调不会重复写入。默认文件为 `callback-results.sqlite3`，可通过 `--db` 指定。接收端不会自动下载结果文件，使用第 4 节的下载脚本或第 5 节的 HTTP 示例获取文件。
 
 ## 3. 上传文件并提交任务（PowerShell）
 
@@ -171,21 +142,22 @@ if ($headers.ContainsKey('Authorization')) {
 $uploadedJson = curl.exe @curlHeaders -sS --fail-with-body -F 'file=@C:/images/reference.png;type=image/png' "$api/projects/$projectId/files"
 if ($LASTEXITCODE -ne 0) { throw '文件上传失败' }
 $uploaded = $uploadedJson | ConvertFrom-Json
-$taskId = [guid]::NewGuid().ToString('N')
+$conversationId = [guid]::NewGuid().ToString('N')
+$chatId = [guid]::NewGuid().ToString('N')
 $task = @{
-    metadata = @{ project_id = $projectId; task_id = $taskId }
+    metadata = @{ project_id = $projectId; conversation_id = $conversationId; chat_id = $chatId }
     instruction = "请分析 @$($uploaded.file_id) 中的内容，并给出结论。"
     files = @(@{ file_id = $uploaded.file_id })
 } | ConvertTo-Json -Depth 5
 
-Write-Host "任务 ID: $taskId"
+Write-Host "会话 ID: $conversationId，对话 ID: $chatId"
 Invoke-RestMethod -Method Post -Uri "$api/tasks" -Headers $headers -ContentType 'application/json; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes($task))
-Invoke-RestMethod -Uri "$api/projects/$projectId/tasks/$taskId" -Headers $headers
+Invoke-RestMethod -Uri "$api/projects/$projectId/conversations/$conversationId/chats/$chatId" -Headers $headers
 ```
 
-上传只需要项目 ID，不需要任务 ID。上例上传 PNG；其他格式需同步调整 `type=` 的值，例如 JPEG 使用 `image/jpeg`。上传成功返回 `file_id`、插件生成的 `filename`、文件大小、SHA-256 等信息。文件名使用 `<秒级时间戳>_<随机6个字符>.<扩展名>`，例如 `1793318400_a7B3xQ.png`。
+上传只需要项目 ID，不需要会话或对话 ID。上例上传 PNG；其他格式需同步调整 `type=` 的值，例如 JPEG 使用 `image/jpeg`。上传成功返回 `file_id`、插件生成的 `filename`、文件大小、SHA-256 等信息。文件名使用 `<秒级时间戳>_<随机6个字符>.<扩展名>`，例如 `1793318400_a7B3xQ.png`。
 
-每个新任务使用新的任务 ID。如果提交时网络超时，不代表任务未被接收；先查询原任务 ID，必要时用同一任务 ID 和完全相同的内容重发，避免生成重复业务任务。
+下一次对话保留 `$conversationId`，更新 `$chatId` 和提示词。先查询上一项任务，确认执行状态为 `completed` 或 `failed`，再提交下一项；无需等待回调完成。
 
 ### 多文件与提示词引用
 
@@ -193,7 +165,7 @@ Invoke-RestMethod -Uri "$api/projects/$projectId/tasks/$taskId" -Headers $header
 
 ```json
 {
-  "metadata": {"project_id": "news", "task_id": "task-002"},
+  "metadata": {"project_id": "news", "conversation_id": "task-002", "chat_id": "chat-1"},
   "instruction": "给 @file_9751f0e64617464da9982a381269698b 中的人物穿上 @file_2b67ffb86bb548a884ac61e7a1484551 中的衣服",
   "files": [
     {"file_id": "file_9751f0e64617464da9982a381269698b"},
@@ -204,68 +176,42 @@ Invoke-RestMethod -Uri "$api/projects/$projectId/tasks/$taskId" -Headers $header
 
 示例 ID 必须替换为实际上传返回的 ID。引用使用完整 `@file_id`，两侧需为空白或文本边界；插件按 ID 匹配，不依赖数组顺序，同一 ID 可以在提示词中出现多次，但 `files` 中每个 ID 只声明一次。未在 `files` 中声明的 ID 会保留原文。附件即使没有在提示词中被引用，也会传入会话。
 
-纯文本任务直接填写提示词，使用 `files: []`。`metadata` 只包含 `project_id` 和 `task_id`；模型和权限使用项目配置。
+纯文本任务直接填写提示词，使用 `files: []`。`metadata` 只接受 `project_id`、`conversation_id`、`chat_id`；模型和权限使用项目配置。
 
-## 4. 完整流程脚本（Python）
+## 4. 运行随包示例
 
-下面的脚本调用插件 API，完成一次图片上传、任务提交和轮询；结果文件由第 2 节的接收端下载。它只依赖 `httpx`，保存为 `run_flow.py`，修改文件路径与提示词后执行 `python run_flow.py`。
+这些脚本只依赖 Python 3.10+ 标准库，业务项目可以使用任意语言实现同样的 HTTP 协议。在仓库根目录另开终端，设置 API 地址和可选令牌：
 
-```python
-from pathlib import Path
-import mimetypes
-import time
-import uuid
-
-import httpx
-
-API = "http://127.0.0.1:3080/api/terms-bridge"
-PROJECT_ID = "news"
-HEADERS = {}  # 启用请求令牌时填写 Authorization: Bearer <实际值>
-SOURCE = Path("C:/images/reference.png")
-
-with httpx.Client(headers=HEADERS, timeout=120) as client:
-    media_type = mimetypes.guess_type(SOURCE.name)[0] or "application/octet-stream"
-    with SOURCE.open("rb") as source:
-        response = client.post(
-            f"{API}/projects/{PROJECT_ID}/files",
-            files={"file": (SOURCE.name, source, media_type)},
-        )
-    response.raise_for_status()
-    file_id = response.json()["file_id"]
-    task_id = uuid.uuid4().hex
-    print("文件 ID：", file_id)
-    print("任务 ID：", task_id)
-    payload = {
-        "metadata": {"project_id": PROJECT_ID, "task_id": task_id},
-        "instruction": f"请分析 @{file_id} 中的内容，并给出结论。",
-        "files": [{"file_id": file_id}],
-    }
-    response = client.post(f"{API}/tasks", json=payload)
-    response.raise_for_status()
-
-    for _ in range(600):
-        response = client.get(f"{API}/projects/{PROJECT_ID}/tasks/{task_id}")
-        response.raise_for_status()
-        task = response.json()
-        status = task["status"]
-        delivery = task["delivery"]["status"]
-        print("执行：", status, "回调：", delivery)
-        if status == "failed":
-            raise RuntimeError(task["execution"]["last_error"])
-        if delivery == "failed":
-            raise RuntimeError(f"回调失败：{task['delivery']['last_error']}；结果仍可通过查询和下载接口获取")
-        if status == "completed" and delivery == "delivered":
-            print(task["result"])
-            print("结果文件数：", len(task["files"]))
-            break
-        time.sleep(3)
-    else:
-        raise TimeoutError(f"等待任务 {task_id} 超时，可继续查询该任务 ID")
+```powershell
+$env:DSH_API_BASE = 'http://127.0.0.1:3080/api/terms-bridge'
+# $env:DSH_REQUEST_TOKEN = 'example-request-token'
+python examples/project_client.py submit examples/task.json
+python examples/project_client.py query news task-001 chat-1
 ```
 
-任务完成与回调成功是两个状态。只需要执行结果时，`status == completed` 即可读取 `result` 和 `files`；需要确认接收端处理完成时，继续等待 `delivery.status == delivered`。上例每 3 秒查询一次，最多 600 次；轮询超时不会取消插件中的任务。
+上传附件、提交任务，再查询并下载结果：
 
-若会话被删除，查询返回 `404 / SESSION_NOT_FOUND`，结束该任务的轮询。不要因回调尚未完成而重新提交一个新任务。
+```powershell
+python examples/upload_and_submit.py news ./input.png --conversation-id task-003 --chat-id chat-1 --instruction '请分析附件中的内容。' --out ./task-003.json
+python examples/project_client.py query news task-003 chat-1
+python examples/download_result.py news file_abcdef0123456789abcdef0123456789 --out ./output.png
+```
+
+替换输入路径和下载命令中的结果文件 ID；请求 JSON 和下载目标均须使用新文件名。下载脚本校验大小及 SHA-256，可用 `--sha256` 传入回调提供的校验值。
+
+`upload_and_submit.py` 在提交前保存请求 JSON；省略两个可选 ID 时在客户端生成，便于响应丢失后查询。提示词原样提交；在指定位置使用 `@file_id` 时，先按第 3 节上传并构造请求。
+
+续聊复用 `conversation_id`，使用新的 `chat_id` 和请求文件。纯文本续聊修改任务 JSON 的提示词及 chat_id 后再次运行 `project_client.py submit`。等待执行状态变为 `completed` 或 `failed` 后再续聊；仅获取结果时无需等待回调成功。会话删除后查询返回 `404 / SESSION_NOT_FOUND`，应停止轮询。
+
+| 文件 | 用途 |
+| --- | --- |
+| [task.json](../examples/task.json) | 纯文本任务请求 |
+| [result-file-task.json](../examples/result-file-task.json) | 请求生成报告并在最终回复中引用文件 |
+| [callback.json](../examples/callback.json) | 纯文本结果回调 |
+| [attachment.txt](../examples/attachment.txt) | 可用于上传的示例附件 |
+| [project_client.py](../examples/project_client.py) | 提交、查询及 SQLite 回调接收 |
+| [upload_and_submit.py](../examples/upload_and_submit.py) | 上传附件、保存请求并提交任务 |
+| [download_result.py](../examples/download_result.py) | 下载文件并校验大小和 SHA-256 |
 
 ## 5. 回调内容与主动下载
 
@@ -273,7 +219,7 @@ with httpx.Client(headers=HEADERS, timeout=120) as client:
 
 ```json
 {
-  "metadata": {"project_id": "news", "task_id": "task-002"},
+  "metadata": {"project_id": "news", "conversation_id": "task-002", "chat_id": "chat-1"},
   "result": "处理完成。\n\n[结果](output.png)",
   "files": [
     {
@@ -294,7 +240,7 @@ with httpx.Client(headers=HEADERS, timeout=120) as client:
 查询到完成结果后，也可以主动下载第一个文件。下面接着使用第 3 节的变量：
 
 ```powershell
-$state = Invoke-RestMethod -Uri "$api/projects/$projectId/tasks/$taskId" -Headers $headers
+$state = Invoke-RestMethod -Uri "$api/projects/$projectId/conversations/$conversationId/chats/$chatId" -Headers $headers
 if ($state.status -ne 'completed') { throw '任务尚未完成' }
 if ($state.files.Count -gt 0) {
     $file = $state.files[0]
@@ -313,41 +259,7 @@ if ($state.files.Count -gt 0) {
 
 插件先保存独立副本再发回调，原文件后续修改不影响已发布副本；不会继续解析文件内容中的其他引用。
 
-## 6. 随包示例
-
-| 文件 | 用途 |
-| --- | --- |
-| [task.json](../examples/task.json) | 纯文本任务请求 |
-| [result-file-task.json](../examples/result-file-task.json) | 请求生成文件并在最终回复引用它 |
-| [project_client.py](../examples/project_client.py) | 标准库提交、查询及 SQLite 回调接收示例 |
-| [upload_and_submit.py](../examples/upload_and_submit.py) | 先上传再提交，并保存请求 JSON，便于按原内容重发 |
-| [download_result.py](../examples/download_result.py) | 按文件 ID 下载并校验大小和 SHA-256 |
-
-这些 Python 示例需要 Python 3.10+，不属于插件运行依赖。业务项目可以使用任意语言实现同样的 HTTP 协议。
-
-标准库示例用法，在插件源码或包含 `examples` 的目录运行：
-
-```powershell
-$env:DSH_API_BASE = 'http://127.0.0.1:3080/api/terms-bridge'
-# 若设置了请求令牌，客户端环境变量填写实际值：
-# $env:DSH_REQUEST_TOKEN = 'example-request-token'
-python examples/project_client.py serve --project-id news --port 8001
-```
-
-另开终端设置同样的 API 地址和可选令牌，再执行：
-
-```powershell
-$env:DSH_API_BASE = 'http://127.0.0.1:3080/api/terms-bridge'
-python examples/upload_and_submit.py news task-003 ./input.png --instruction '请分析附件中的内容。' --out ./task-003.json
-python examples/project_client.py query news task-003
-python examples/download_result.py news file_abcdef0123456789abcdef0123456789 --out ./output.png
-```
-
-下载命令里的文件 ID 换成实际结果；目标文件必须不存在。`project_client.py serve` 保存回调 JSON，但不会自动下载文件，可按需使用下载示例。它与第 2 节接收端二选一，不能同时占用 8001 端口；启用自定义回调头时，使用 `DSH_CALLBACK_HEADERS` 环境变量传入对应 JSON。
-
-`upload_and_submit.py` 的提示词原样提交，上例通过附件使用文件；若要在提示词指定位置使用 `@file_id`，先上传取得 ID，再参照第 3、4 节构造请求。
-
-## 7. 接口参考
+## 6. 接口参考
 
 以下路径均位于配置的 API 前缀下，默认是 `/api/terms-bridge`。未设置请求令牌时不发送鉴权头；设置后四个接口都要求 `Authorization: Bearer <令牌>`，它与 dsh 页面登录凭证不同。
 
@@ -357,12 +269,12 @@ python examples/download_result.py news file_abcdef0123456789abcdef0123456789 --
 | --- | --- | --- |
 | POST | `/projects/{project_id}/files` | 上传输入文件 |
 | POST | `/tasks` | 提交任务 |
-| GET | `/projects/{project_id}/tasks/{task_id}` | 查询执行状态、回调状态及完成结果 |
+| GET | `/projects/{project_id}/conversations/{conversation_id}/chats/{chat_id}` | 查询指定对话的执行状态、回调状态及完成结果 |
 | GET | `/projects/{project_id}/files/{file_id}` | 下载输入文件或结果文件 |
 
 ### 上传：POST /projects/{project_id}/files
 
-使用未压缩的 `multipart/form-data`，且仅有一个名为 `file` 的文件字段，不附带任务 ID。成功返回 `201`，响应体是文件元数据：
+使用未压缩的 `multipart/form-data`，且仅有一个名为 `file` 的文件字段，不附带会话或对话 ID。成功返回 `201`，响应体是文件元数据：
 
 | 字段 | 类型 | 含义 |
 | --- | --- | --- |
@@ -383,7 +295,8 @@ python examples/download_result.py news file_abcdef0123456789abcdef0123456789 --
 | 字段 | 要求 |
 | --- | --- |
 | `metadata.project_id` | 1–64 位小写字母、数字、`_`、`-`，首位是字母或数字；必须已配置 |
-| `metadata.task_id` | 1–128 位大小写字母、数字、`.`、`_`、`:`、`-`，首位是字母或数字 |
+| `metadata.conversation_id` | 可省略；1–128 位大小写字母、数字、`.`、`_`、`:`、`-`，首位是字母或数字 |
+| `metadata.chat_id` | 可省略；格式与 conversation_id 相同，必须是该会话内未被受理过的 ID |
 | `instruction` | 必填非空字符串，最多 32768 个字符；原样作为用户提示词，仅替换声明过的 `@file_id` |
 | `files` | 必填数组，元素为 `{ "file_id": "..." }`；最多 20 项，不可重复，合计不超过 200 MiB |
 
@@ -391,21 +304,20 @@ python examples/download_result.py news file_abcdef0123456789abcdef0123456789 --
 
 ```json
 {
-  "metadata": {"project_id": "news", "task_id": "task-001"},
-  "status": "queued",
-  "duplicate": false
+  "metadata": {"project_id": "news", "conversation_id": "task-001", "chat_id": "chat-1"},
+  "status": "queued"
 }
 ```
 
-`Location` 响应头给出查询路径。同项目、同任务 ID、相同提示词及相同顺序文件列表再次提交，返回 `200` 和 `duplicate: true`，不重复执行；内容改变则返回 `409 / TASK_CONFLICT`。JSON 属性排列顺序不影响幂等判断。
+`Location` 响应头给出包含三个 ID 的查询路径。响应 metadata 始终返回完整的三个 ID，包括插件生成的值。相同三元组再次提交一律 `409 / CHAT_ALREADY_EXISTS`，无论任务状态或内容是否变化。未被受理的请求不占用 chat_id。
 
-### 查询：GET /projects/{project_id}/tasks/{task_id}
+### 查询：GET /projects/{project_id}/conversations/{conversation_id}/chats/{chat_id}
 
 成功返回 `200`。执行完成时的示例：
 
 ```json
 {
-  "metadata": {"project_id": "news", "task_id": "task-001"},
+  "metadata": {"project_id": "news", "conversation_id": "task-001", "chat_id": "chat-1"},
   "status": "completed",
   "execution": {"attempts": 1, "session_id": "dsh-session-id", "next_retry_at": null, "last_error": null},
   "delivery": {"status": "delivered", "attempts": 1, "next_retry_at": null, "last_error": null},
@@ -417,13 +329,13 @@ python examples/download_result.py news file_abcdef0123456789abcdef0123456789 --
 }
 ```
 
-`attempts` 包括首次尝试。`session_id` 是最近一次尝试的会话 ID，尚未执行时为空。时间均为 UTC ISO 8601；尚未发生的时间为 `null`。仅 `completed` 包含 `result` 和 `files`，回调最终失败后它们仍可查询。
+查询路径中的三个 ID 均必填。`attempts` 包括首次尝试。`session_id` 是该 conversation_id 对应的原生 dsh 会话 UUID，在受理时预分配，首次执行时创建；同一会话的不同 chat_id 和内部重试均保持该值。时间均为 UTC ISO 8601；尚未发生的时间为 `null`。仅 `completed` 包含 `result` 和 `files`，回调最终失败后它们仍可查询。
 
 | 执行状态 | 含义 |
 | --- | --- |
 | `queued` | 已受理，等待执行空位 |
 | `running` | 当前会话正在执行 |
-| `retrying` | 本次失败，等待下一次新会话尝试 |
+| `retrying` | 本次失败，等待在同一会话中重试；仍占用会话 |
 | `completed` | 结果已持久化；不代表回调已成功 |
 | `failed` | 执行尝试耗尽 |
 
@@ -439,17 +351,17 @@ python examples/download_result.py news file_abcdef0123456789abcdef0123456789 --
 
 ### 下载：GET /projects/{project_id}/files/{file_id}
 
-成功返回 `200` 和文件二进制，支持已上传的输入文件及已发布的结果文件。无需任务 ID；文件必须属于该项目。
+成功返回 `200` 和文件二进制，支持已上传的输入文件及已发布的结果文件。无需会话或对话 ID；文件必须属于该项目。
 
 响应头包括 `Content-Type: application/octet-stream`、`Content-Length`、`Content-Disposition` 和 `X-DSH-File-SHA256`。下载前检查文件大小及 SHA-256，内容被外部改写时返回 `422 / FILE_UNAVAILABLE`。只支持 GET，不提供 HEAD 或 Range 分段下载协议。
 
 ### 结果回调
 
-插件向项目配置的地址发 `POST`，请求体见第 5 节。默认请求头是 `Content-Type: application/json`、`X-DSH-Protocol-Version: 2`，再添加项目配置的自定义头。
+插件向项目配置的地址发 `POST`，请求体见第 5 节。默认请求头是 `Content-Type: application/json`、`X-DSH-Protocol-Version: 3`，再添加项目配置的自定义头。metadata 必须包含完整的三个 ID。
 
 自定义头必须为字符串键值对，最多 32 项，JSON 总大小最多 8 KiB。名称大小写不敏感，不可重复。不能覆盖上述两个固定头、Host、Content-Length、连接控制或代理认证等保留字段；非法字符和换行会被配置校验拒绝。
 
-仅 2xx 表示成功，不跟随 3xx 重定向。失败后固定重试 10 次，每次间隔 60 秒。重试使用相同请求体和原任务配置，不再次运行 AI。接收端应按 `(project_id, task_id)` 处理重复回调，在完成接收或可靠保存后再返回成功。
+仅 2xx 表示成功，不跟随 3xx 重定向。失败后固定重试 10 次，每次间隔 60 秒。重试使用相同请求体和原任务配置，不再次运行 AI。接收端应按 `(project_id, conversation_id, chat_id)` 处理重复回调，在完成接收或可靠保存后再返回成功。回调可能晚于该会话的后续对话完成，必须按 chat_id 关联结果，不能依赖回调到达顺序。
 
 ### 错误响应
 
@@ -466,7 +378,9 @@ python examples/download_result.py news file_abcdef0123456789abcdef0123456789 --
 | 404 | `SESSION_NOT_FOUND` | 会话已被删除，停止查询该任务 |
 | 405 | `METHOD_NOT_ALLOWED` | 使用对应接口规定的方法，参考 Allow 头 |
 | 408 | `UPLOAD_TIMEOUT` | 上传超时，可重新上传 |
-| 409 | `TASK_CONFLICT` | 同任务 ID 的内容不同；使用原请求或新任务 ID |
+| 409 | `CHAT_ALREADY_EXISTS` | 三元组已受理，继续查询该对话；需要新对话时使用新的 chat_id |
+| 409 | `CONVERSATION_BUSY` | 同会话有未结束任务，或正在从 dsh 界面执行对话；等待空闲后再提交 |
+| 409 | `CONVERSATION_WORKSPACE_CHANGED` | 既有会话绑定原工作区；恢复原项目绑定或使用新的 conversation_id |
 | 413 | `PAYLOAD_TOO_LARGE`、`FILE_TOO_LARGE`、`TASK_FILES_TOO_LARGE` | 减少请求或文件大小 |
 | 415 | `UNSUPPORTED_MEDIA_TYPE` | 使用正确 Content-Type 和未压缩正文 |
 | 422 | `FILE_UNAVAILABLE` | 文件元数据无效、内容改变或路径不受支持；重新上传输入文件 |
@@ -475,7 +389,9 @@ python examples/download_result.py news file_abcdef0123456789abcdef0123456789 --
 
 程序根据 HTTP 状态及 `error.code` 分支，`message` 用于展示，不作为稳定协议解析。
 
-## 8. 限制与任务执行
+可确定提交请求标识的错误（如重复或会话忙碌）会同时返回完整 metadata；鉴权失败、JSON 无法解析或 metadata 本身无效等错误不保证包含它。任何响应只要包含 metadata，就包含全部三个 ID。
+
+## 7. 限制与任务执行
 
 ### 限制与默认值
 
@@ -493,8 +409,12 @@ python examples/download_result.py news file_abcdef0123456789abcdef0123456789 --
 
 ### 排队与重试
 
-- 最大并发留空或为 0 时不限制；正整数限制当前项目的执行会话，多余任务按可执行时间排队。回调使用独立队列。
-- 执行重试次数不包含首次执行，设为 0 则只执行一次。会话初始化或执行失败都会消耗重试额度，每次重试创建新会话。
+- 最大并发留空或为 0 时不限制；正整数限制当前项目的执行会话，不同会话的多余任务按可执行时间排队。同会话的新任务在上一项结束前直接拒绝。回调使用独立队列。
+- 执行重试次数不包含首次执行，设为 0 则只执行一次。会话初始化或执行失败都会消耗重试额度；已创建的原生会话及三个业务 ID 保持不变。失败尝试留下的上下文仍由 dsh 保留和管理。
 - 执行失败且重试耗尽后，通过查询接口查看失败状态。成功完成的任务才发送结果回调；回调失败只重发结果。
 - 重启后继续处理已排队任务和剩余回调；被中断的执行按剩余次数重试，不重置已消耗次数。业务操作的幂等性由业务项目处理。
 - 会话删除后停止处理其任务，查询返回 `404 / SESSION_NOT_FOUND`。
+- 插件保存业务会话与原生会话 ID 的映射；创建、恢复和 Agent 生命周期由 DSH 的 `sessionController` 管理。每次执行实时获取 Agent 并检查状态，通过原生消息接口发送任务。任务结束和插件停用均不销毁 Agent，后续界面对话和维护操作仍由 DSH 处理。
+- 本次对话结束后，插件保存其最终回复及结果文件；同会话的后续执行在文件保存完成后继续。因此后续界面消息不会改变本次任务的结果或结束状态，但会影响下一项任务的接收。
+- 取消尚未开始的任务时，只撤回该任务的消息；已开始时，只取消对应的执行。原生上下文维护和其他排队消息由 dsh 自行处理。
+- 若请求受理后会话又开始处理界面输入，插件等待其空闲再发送任务，不消耗重试次数，也不占用等待期间的执行并发名额。

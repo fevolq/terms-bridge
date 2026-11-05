@@ -28,7 +28,7 @@ async function setup(t, options = {}) {
   return { ...f, root, workspace, base, upload, submit };
 }
 
-test('project-only upload is reusable by multiple tasks; retries get isolated original bytes and survive reload', async t => {
+test('project-only upload is reusable by multiple chats; retries get isolated original bytes and survive reload', async t => {
   const observed = [];
   const f = await setup(t, { run: async (record, signal) => {
     const [file] = await prepareTaskFiles(record, signal);
@@ -39,17 +39,17 @@ test('project-only upload is reusable by multiple tasks; retries get isolated or
   } });
   const response = await f.upload(); assert.equal(response.status, 201);
   const file = await response.json(); assert.match(file.filename, /^\d{10}_[a-zA-Z0-9]{6}\.txt$/); assert.equal(file.size, 11); assert.match(file.sha256, /^[a-f0-9]{64}$/);
-  assert.equal(file.project_id, 'news'); assert.equal('task_id' in file, false); assert.equal('path' in file, false);
+  assert.equal(file.project_id, 'news'); assert.equal('conversation_id' in file, false); assert.equal('chat_id' in file, false); assert.equal('path' in file, false);
   const body = { ...request('CON:task'), files: [{ file_id: file.file_id }] };
   assert.equal((await f.submit(body)).status, 202);
-  assert.equal((await f.submit(body)).status, 200);
+  assert.equal((await f.submit(body)).status, 409);
   assert.equal((await f.submit({ ...body, files: [] })).status, 409);
   const restored = new FileLibrary(); assert.deepEqual(await restored.resolve('news', f.projects.get('news'), body.files), [file]);
   await f.cycle(); f.advance(60000); await f.cycle(); await f.cycle();
   assert.equal(f.record('CON:task').status, 'completed'); recordSchema.parse(f.record('CON:task'));
-  assert.equal((await f.submit({ ...body, metadata: { ...body.metadata, task_id: 'reuse' } })).status, 202);
+  assert.equal((await f.submit({ ...body, metadata: { ...body.metadata, chat_id: 'reuse' } })).status, 202);
   await f.cycle(); assert.equal(observed.length, 3);
-  assert.ok(observed.every(x => x.text === 'hello files')); assert.equal(new Set(observed.map(x => x.path)).size, 3); assert.equal(new Set(observed.map(x => x.session)).size, 3);
+  assert.ok(observed.every(x => x.text === 'hello files')); assert.equal(new Set(observed.map(x => x.path)).size, 3); assert.equal(new Set(observed.map(x => x.session)).size, 1);
   assert.equal((await f.upload('other', '说明.txt')).status, 201);
   assert.equal((await restored.resolve('news', f.projects.get('news'), body.files))[0].sha256, file.sha256);
 });

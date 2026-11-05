@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { request, deferred, until } from './helpers.mjs';
 import { mountNativePresets } from './native-presets.mjs';
+import { mountNativeController } from './native-controller.mjs';
 
 const bridge = process.env.BRIDGE_TEST_PACKAGE
   ? await import(pathToFileURL(createRequire(process.env.BRIDGE_TEST_PACKAGE).resolve('@fevolq/terms-bridge')))
@@ -63,6 +64,17 @@ test('installed dsh core executes task, persists workspace membership, collects 
         yield { type: 'finish', reason: { kind: 'stop' } };
         return;
       }
+      if (JSON.stringify(options.messages.at(-1)).includes('native-followup')) {
+        calls++;
+        const history = JSON.stringify(options.messages);
+        assert.match(history, /请阅读/);
+        assert.match(history, /real dsh core result/);
+        if (history.includes('native-followup-after-restart')) assert.match(history, /native continuation result/);
+        yield { type: 'block-start', index: 0, blockType: 'text' };
+        yield { type: 'block-end', index: 0, block: { type: 'text', text: 'native continuation result' } };
+        yield { type: 'finish', reason: { kind: 'stop' } };
+        return;
+      }
       assert.ok(options.tools.some(tool => tool.name === 'skill'));
       assert.ok(options.tools.some(tool => tool.name === 'preset_probe'));
       assert.ok(!options.tools.some(tool => tool.name === 'ask_user_question'));
@@ -108,11 +120,12 @@ test('installed dsh core executes task, persists workspace membership, collects 
   const modelFiber = ctx.plugin({ name: 'test-business-model', inject: ['llm'], apply(c) { c.llm.registerAdapter(['test-business'], new MockModel()); } });
   fibers.push(modelFiber); await modelFiber.await();
   await mount('dsh-agent-loop', { agents: [] });
+  await mountNativeController(ctx, mount, load, dir, fibers, { provider: 'test-business', model: 'mock-business' });
   await mount('dsh-host-webserver', { host: '127.0.0.1', port: 0 });
   const origin = ctx.webServer.getOrigin(); let received; const callbackIds = [];
   const removeCallback = ctx.webServer.register({ kind: 'exact', path: '/test-callback', handler: async (req, res) => {
     const parts = []; for await (const part of req) parts.push(part);
-    received = JSON.parse(Buffer.concat(parts).toString()); callbackIds.push(received.metadata.task_id); res.writeHead(204); res.end();
+    received = JSON.parse(Buffer.concat(parts).toString()); callbackIds.push(received.metadata.conversation_id); res.writeHead(204); res.end();
   } });
   t.after(removeCallback);
   const config = { projects: { news: { name: '同名项目', workspace_path: workspace, provider: 'test-business', model: 'mock-business',
@@ -134,7 +147,7 @@ test('installed dsh core executes task, persists workspace membership, collects 
   let task;
   for (let i = 0; i < 100; i++) {
     await new Promise(r => setTimeout(r, 50));
-    const result = await fetch(prefix + '/projects/news/tasks/task-1', { headers: { Authorization: 'Bearer isolated-host-token' } });
+    const result = await fetch(prefix + '/projects/news/conversations/task-1/chats/chat-1', { headers: { Authorization: 'Bearer isolated-host-token' } });
     task = await result.json();
     if (task.delivery?.status === 'delivered' || task.status === 'failed') break;
   }
@@ -150,6 +163,17 @@ test('installed dsh core executes task, persists workspace membership, collects 
   assert.equal(download.status, 200); assert.equal(await download.text(), 'native result file');
   const grouped = ctx.workspaceRegistry.list().find(w => w.path === taskPath(workspace));
   assert.ok(grouped.sessionIds.includes(task.execution.session_id));
+  const chat = async (chatId) => (await fetch(prefix + `/projects/news/conversations/task-1/chats/${chatId}`, { headers: { Authorization: 'Bearer isolated-host-token' } })).json();
+  const followup = (chatId, instruction) => fetch(prefix + '/tasks', {
+    method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer isolated-host-token' },
+    body: JSON.stringify({ ...request('task-1', 'news', chatId), instruction }),
+  });
+  assert.equal((await followup('second', 'native-followup')).status, 202);
+  await until(async () => (await chat('second')).delivery?.status === 'delivered');
+  const second = await chat('second');
+  assert.equal(second.execution.session_id, task.execution.session_id);
+  assert.equal(second.result, 'native continuation result'); assert.deepEqual(second.files, []);
+  assert.equal(grouped.sessionIds.filter(id => id === task.execution.session_id).length, 1);
 
   // Exercise the same settings mutation API used by the UI, with an isolated
   // profile editor. No user profile or live dsh configuration is modified.
@@ -177,7 +201,7 @@ test('installed dsh core executes task, persists workspace membership, collects 
   const post = (id, project = 'news', base = prefix) => fetch(base + '/tasks', {
     method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer isolated-host-token' }, body: JSON.stringify(request(id, project)),
   });
-  const query = async (id, project = 'news', base = prefix) => (await fetch(base + `/projects/${project}/tasks/${id}`, { headers: { Authorization: 'Bearer isolated-host-token' } })).json();
+  const query = async (id, project = 'news', base = prefix) => (await fetch(base + `/projects/${project}/conversations/${id}/chats/chat-1`, { headers: { Authorization: 'Bearer isolated-host-token' } })).json();
   hold = deferred();
   assert.equal((await post('in-flight')).status, 202); await until(() => holding);
   const running = await query('in-flight');
@@ -248,12 +272,19 @@ test('installed dsh core executes task, persists workspace membership, collects 
   assert.equal((await post('auto-unavailable')).status, 202);
   await until(async () => (await query('auto-unavailable')).status === 'failed');
   assert.equal(calls, beforeUnavailable, 'Unavailable Auto must not fall back to unreviewed execution');
+  const nativeAgent = ctx.agents.get(task.execution.session_id);
   await plugin.dispose();
+  assert.equal(ctx.agents.get(task.execution.session_id), nativeAgent, 'Unloading the bridge must not dispose DSH agents');
   // Restart just this plugin over its durable domain; do not rerun a delivered task.
-  const reloaded = ctx.plugin(bridge, saved); fibers.push(reloaded); await reloaded.await();
-  const restored = await fetch(prefix + '/projects/news/tasks/task-1', { headers: { Authorization: 'Bearer isolated-host-token' } });
+  const reloaded = ctx.plugin(bridge, { ...saved, projects: { news: { ...config.projects.news, permission_mode: 'workspace-write' } } }); fibers.push(reloaded); await reloaded.await();
+  const restored = await fetch(prefix + '/projects/news/conversations/task-1/chats/chat-1', { headers: { Authorization: 'Bearer isolated-host-token' } });
   assert.equal((await restored.json()).delivery.status, 'delivered');
   const restoredDownload = await fetch(prefix + '/projects/news/files/' + publishedId, { headers: { Authorization: 'Bearer isolated-host-token' } });
   assert.equal(restoredDownload.status, 200); assert.equal(await restoredDownload.text(), 'native result file');
+  assert.equal((await followup('third', 'native-followup-after-restart')).status, 202);
+  await until(async () => (await chat('third')).delivery?.status === 'delivered');
+  assert.equal((await chat('third')).execution.session_id, task.execution.session_id);
+  assert.equal((await chat('second')).result, 'native continuation result');
+  assert.equal((await followup('second', 'duplicate with changed content')).status, 409);
   function taskPath(path) { return path; }
 });

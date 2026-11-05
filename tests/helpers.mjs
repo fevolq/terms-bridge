@@ -5,6 +5,7 @@ import { TaskEngine } from '../dist/services/tasks.js';
 import { parseConfig } from '../dist/projects/config.js';
 import { taskKey } from '../dist/domain/request.js';
 import { once } from 'node:events';
+import { randomUUID } from 'node:crypto';
 
 // Windows can allocate an ephemeral port that fetch refuses under the Fetch bad-port list.
 export async function listenHttp(server) {
@@ -28,8 +29,11 @@ export class MemoryTable {
     this.chain = work; return work;
   }
 }
-export function request(id = 'task-1', project = 'news') {
-  return { metadata: { project_id: project, task_id: id }, instruction: 'Summarize input.', files: [] };
+export function request(id = 'task-1', project = 'news', chat = 'chat-1') {
+  return { metadata: { project_id: project, conversation_id: id, chat_id: chat }, instruction: 'Summarize input.', files: [] };
+}
+export function conversation() {
+  return { project_id: 'news', conversation_id: 'task-1', session_id: randomUUID(), workspace_id: 'workspace-1', workspace_path: process.cwd(), created: false, deleted: false };
 }
 export function project(overrides = {}) {
   const p = parseConfig({ projects: { news: {
@@ -38,14 +42,14 @@ export function project(overrides = {}) {
   } } }).projects.news;
   return { ...p, workspace_id: 'workspace-1' };
 }
-export async function fixture({ run = async () => {}, callback = async () => null, overrides = {}, table = new MemoryTable(), files = new FileLibrary(), sessionExists, transferOptions } = {}) {
+export async function fixture({ run = async () => {}, callback = async () => null, overrides = {}, table = new MemoryTable(), conversationTable = new MemoryTable(), files = new FileLibrary(), sessionExists, sessionBusy, transferOptions } = {}) {
   let time = Date.parse('2026-10-30T00:00:00Z');
   const projects = new Map([['news', project(overrides)]]);
-  const store = new TaskStore(table);
-  const engine = new TaskEngine(store, projects, run, { callback, now: () => time, files, sessionExists });
+  const store = new TaskStore(table, conversationTable);
+  const engine = new TaskEngine(store, projects, run, { callback, now: () => time, files, sessionExists, sessionBusy });
   await engine.recover();
-  return { engine, store, table, projects, files, transfer: new FileTransfer(files, transferOptions), advance: ms => { time += ms; },
-    record: (id = 'task-1') => store.get(taskKey('news', id)),
+  return { engine, store, table, conversationTable, projects, files, transfer: new FileTransfer(files, transferOptions), advance: ms => { time += ms; },
+    record: (id = 'task-1', chat = 'chat-1') => store.get(taskKey('news', id, chat)),
     cycle: async () => { engine.tick(); await engine.settle(); } };
 }
 export async function successRun() { return { result: 'done', files: [] }; }
@@ -53,4 +57,38 @@ export function deferred() { let resolve; const promise = new Promise(r => { res
 export async function until(test) {
   for (let i = 0; i < 200; i++) { if (await test()) return; await new Promise(r => setTimeout(r, 5)); }
   throw new Error('condition did not become true');
+}
+
+// Minimal native event order for file-adapter tests; real driver boundaries are tested separately.
+export function fileTestAgent(implementation) {
+  const listeners = new Map(); let activity = Promise.resolve();
+  const emit = (name, ...args) => { for (const listener of listeners.get(name) ?? []) listener(...args); };
+  const agent = { ...implementation, status: 'idle', inbox: { nextTurn: [], hasPending: false, remove: () => false },
+    ctx: { tools: { get() {} }, on(name, listener) {
+      const group = listeners.get(name) ?? new Set(); listeners.set(name, group); group.add(listener);
+      return () => group.delete(listener);
+    } },
+    followup(message) {
+      implementation.followup(message); agent.status = 'running';
+      emit('agent/inbox/claimed', { agent, message, turn: 1 });
+      activity = Promise.resolve().then(() => implementation.whenIdle()).then(() => {
+        emit('session/event', agent.session, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } });
+        agent.status = 'idle';
+      });
+    }, whenIdle: () => activity,
+  };
+  return agent;
+}
+
+export function fileTestSessions(create) {
+  const agents = new Map();
+  return {
+    agents: { get: id => agents.get(id) },
+    sessionProjections: { stateOf: () => ({ pending: null }) },
+    sessionController: {
+      async create(options) { agents.set(options.sessionId, await create(options)); return { sessionId: options.sessionId }; },
+      async resolveAgent(id) { return { agent: agents.get(id) }; },
+      agents: { selectionFor: () => ({ current: { provider: 'test', model: 'test-model' } }), selectForNextRequest() {} },
+    },
+  };
 }
