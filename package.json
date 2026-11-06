@@ -1,27 +1,70 @@
 {
   "name": "@fevolq/terms-bridge",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Project task execution and result delivery for DeepSeek Harness.",
   "license": "MIT",
-  "repository": { "type": "git", "url": "git+https://github.com/fevolq/terms-bridge.git" },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fevolq/terms-bridge.git"
+  },
   "homepage": "https://github.com/fevolq/terms-bridge#readme",
-  "bugs": { "url": "https://github.com/fevolq/terms-bridge/issues" },
-  "keywords": ["dsh-plugin", "deepseek-harness", "terms-bridge"],
-  "publishConfig": { "access": "public", "registry": "https://registry.npmjs.org" },
+  "bugs": {
+    "url": "https://github.com/fevolq/terms-bridge/issues"
+  },
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "terms-bridge"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
+  },
   "type": "module",
-  "engines": { "node": ">=22" },
-  "exports": { ".": "./dist/index.js", "./client": "./dist/client.js" },
-  "files": ["dist", "README.md", "docs/usage.md", "examples", "cordis.patch.yml"],
+  "engines": {
+    "node": ">=22"
+  },
+  "exports": {
+    ".": "./dist/index.js",
+    "./client": "./dist/client.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "docs/usage.md",
+    "examples",
+    "cordis.patch.yml"
+  ],
   "dsh": {
-    "bundle": { "patch": "./cordis.patch.yml" },
-    "client": { "platform": "web", "inject": ["@deepseek-ai/dsh-client-ui-settings", "@deepseek-ai/dsh-api-remotes"] }
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-api-remotes"
+      ]
+    }
   },
   "scripts": {
     "build": "node scripts/build.mjs",
     "test": "npm run build && node --test tests/*.test.mjs",
     "prepack": "npm run build"
   },
-  "dependencies": { "@deepseek-ai/schemastery": "^3.18.5", "busboy": "^1.6.0", "zod": "^4.4.3" },
-  "bundledDependencies": ["@deepseek-ai/schemastery", "busboy", "zod"],
-  "devDependencies": { "@types/busboy": "^1.5.4", "@types/node": "^22.19.0", "typescript": "^5.9.3" }
+  "dependencies": {
+    "@deepseek-ai/schemastery": "^3.18.5",
+    "busboy": "^1.6.0",
+    "zod": "^4.4.3"
+  },
+  "bundledDependencies": [
+    "@deepseek-ai/schemastery",
+    "busboy",
+    "zod"
+  ],
+  "devDependencies": {
+    "@types/busboy": "^1.5.4",
+    "@types/node": "^22.19.0",
+    "typescript": "^5.9.3"
+  }
 }

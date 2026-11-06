@@ -1,6 +1,6 @@
-import { ApiError, bytes, conversationKey, resolveMetadata, taskKey, validateRequest } from '../domain/request.js';
-import { beginDelivery, beginExecution, completed, deliveryFinished, executionFailed, publicTask, queued } from '../domain/task.js';
-import { UnsettledExecutionError, type ResolvedProject, type Run, type TaskMetadata, type TaskRecord, type UploadedFile } from '../domain/types.js';
+import { ApiError, bytes, resolveMetadata, taskKey, validateRequest } from '../domain/request.js';
+import { beginDelivery, beginExecution, completed, executing, deliveryFinished, executionFailed, publicTask, queued } from '../domain/task.js';
+import { UnsettledExecutionError, type ProjectState, type ResolvedProject, type Run, type TaskMetadata, type TaskRecord, type UploadedFile } from '../domain/types.js';
 import { LIMITS } from '../shared/rules.js';
 import type { TaskStore } from '../storage/tasks.js';
 
@@ -11,6 +11,7 @@ interface TaskPorts {
   callback(task: TaskRecord, signal: AbortSignal): Promise<string | null>;
   now?: () => number; log?: (message: string) => void; sessionExists?: (id: string) => Promise<boolean>;
   sessionBusy?: (id: string) => boolean;
+  prepareProject?: (id: string, signal: AbortSignal, beforeRelocate: () => void) => Promise<ResolvedProject>;
 }
 /** Application service: scheduling and durable commands, with all external work injected. */
 export class TaskEngine {
@@ -22,18 +23,33 @@ export class TaskEngine {
   private delivering = new Map<string, Promise<void>>();
   private requests = new Set<Promise<unknown>>();
   private admissions = new Set<Promise<unknown>>();
+  private uploads = new Map<string, number>();
   private now: () => number;
-  constructor(readonly store: TaskStore, readonly projects: Map<string, ResolvedProject>, private run: Run, private ports: TaskPorts) {
+  constructor(readonly store: TaskStore, readonly projects: Map<string, ProjectState>, private run: Run, private ports: TaskPorts) {
     this.now = ports.now ?? Date.now;
   }
   get available(): boolean { return this.ready && !this.broken && !this.stop.signal.aborted; }
-  project(id: string): ResolvedProject {
+  project(id: string): ProjectState {
     const project = this.projects.get(id);
     if (!project) throw new ApiError(404, 'PROJECT_NOT_FOUND', 'Project is not configured');
     return project;
   }
   private assertReady(): void {
     if (!this.available) throw new ApiError(503, 'SERVICE_UNAVAILABLE', 'Task bridge is stopping or not ready');
+  }
+  private async prepareProject(id: string, signal: AbortSignal, metadata?: TaskMetadata): Promise<ResolvedProject> {
+    const project = this.project(id), conversation = metadata && this.store.conversations.get(metadata);
+    const changed = () => new ApiError(409, 'CONVERSATION_WORKSPACE_CHANGED', '会话绑定的工作区路径已变化', metadata);
+    if (conversation && project.workspace_path !== conversation.workspace_path) throw changed();
+    const beforeRelocate = () => {
+      if (conversation) throw changed();
+      if (this.uploads.get(id) || this.store.list().some(([, task]) => task.request.metadata.project_id === id && !this.store.deleted(task) && executing(task))) {
+        throw new ApiError(409, 'PROJECT_BUSY', '项目仍有未结束任务或文件上传，暂时无法切换工作区目录', metadata);
+      }
+    };
+    if (this.ports.prepareProject) return this.ports.prepareProject(id, signal, beforeRelocate);
+    if (!project.workspace_path) throw new ApiError(503, 'WORKSPACE_UNAVAILABLE', 'Project workspace is not initialized', metadata);
+    return { ...project, workspace_path: project.workspace_path };
   }
   /** Admissions fence configuration changes; all operations are drained on shutdown. */
   async track<T>(operation: Promise<T>, admission = false): Promise<T> {
@@ -42,17 +58,43 @@ export class TaskEngine {
     try { return await operation; }
     finally { this.requests.delete(operation); this.admissions.delete(operation); }
   }
+  /** Prepare under the project lock; stream concurrently while keeping that path bound. */
+  async upload<T>(id: string, receive: (prepare: (signal: AbortSignal) => Promise<ResolvedProject>) => Promise<T>): Promise<T> {
+    this.assertReady(); this.project(id);
+    let prepared: ResolvedProject | undefined;
+    const prepare = (signal: AbortSignal) => this.store.locked('project:' + id, async () => {
+      this.assertReady(); signal.throwIfAborted();
+      if (prepared) return prepared;
+      const next = await this.prepareProject(id, signal);
+      signal.throwIfAborted();
+      prepared = next;
+      this.uploads.set(id, (this.uploads.get(id) ?? 0) + 1);
+      return prepared;
+    });
+    return this.track((async () => {
+      try { return await receive(prepare); }
+      finally {
+        if (prepared) {
+          const count = (this.uploads.get(id) ?? 1) - 1;
+          if (count) this.uploads.set(id, count); else this.uploads.delete(id);
+        }
+      }
+    })(), true);
+  }
   async accept(input: unknown) {
     this.assertReady();
-    const metadata = resolveMetadata(input), project = this.project(metadata.project_id);
+    const metadata = resolveMetadata(input);
+    this.project(metadata.project_id);
     const key = taskKey(metadata.project_id, metadata.conversation_id, metadata.chat_id);
-    return this.track(this.store.locked(conversationKey(metadata.project_id, metadata.conversation_id), async () => {
+    // Directory recovery changes a project binding; serialize admissions for that project.
+    return this.track(this.store.locked('project:' + metadata.project_id, async () => {
       this.assertReady();
       if (this.store.get(key)) throw new ApiError(409, 'CHAT_ALREADY_EXISTS', 'chat_id already exists in this conversation', metadata);
       if (await this.conversationDeleted(metadata)) throw new ApiError(404, 'SESSION_NOT_FOUND', '会话不存在', metadata);
       const existing = this.store.conversations.get(metadata);
       if (this.store.busy(metadata) || existing && this.ports.sessionBusy?.(existing.session_id)) throw new ApiError(409, 'CONVERSATION_BUSY', 'Conversation has an unfinished task', metadata);
       const request = validateRequest(input, metadata);
+      const project = await this.prepareProject(metadata.project_id, this.stop.signal, metadata);
       const files = await this.ports.files.resolve(metadata.project_id, project, request.files);
       this.assertReady();
       // An empty binding after a failed task write does not reserve the conversation.
@@ -89,13 +131,18 @@ export class TaskEngine {
     }
     this.ready = true;
   }
-  async reconfigure(projects: Map<string, ResolvedProject>, activate: () => void = () => {}): Promise<void> {
+  async reconfigure(source: Map<string, ProjectState> | (() => Promise<Map<string, ProjectState>>), activate: (projects: Map<string, ProjectState>) => void | Promise<void> = () => {}): Promise<void> {
     while (this.admissions.size) await Promise.allSettled([...this.admissions]);
     this.assertReady();
-    this.store.assertProjects(projects);
-    activate();
-    this.projects.clear();
-    for (const [id, project] of projects) this.projects.set(id, project);
+    // Drain admissions first; keep the old registry until persistence and route activation succeed.
+    this.ready = false;
+    try {
+      const projects = typeof source === 'function' ? await source() : source;
+      this.store.assertProjects(projects);
+      await activate(projects);
+      this.projects.clear();
+      for (const [id, project] of projects) this.projects.set(id, project);
+    } finally { this.ready = !this.stop.signal.aborted; }
   }
   start(): void {
     if (this.timer) return;

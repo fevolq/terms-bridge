@@ -5,7 +5,7 @@ import type { PluginConfig } from '../domain/types.js';
 const positive = z.number().int().min(1).max(LIMITS.numeric);
 const optionalText = z.string().trim().transform(value => value || undefined).optional();
 export const projectSchema = z.object({
-  name: z.string().min(1).optional(), workspace_path: optionalText,
+  name: z.string().min(1).optional(), created_at: z.string().datetime().optional(), workspace_path: optionalText,
   provider: z.string().min(1), model: z.string().min(1), agent_preset: optionalText,
   permission_mode: z.enum(PERMISSIONS).default(DEFAULTS.permission_mode),
   max_concurrency: z.number().int().min(0).max(LIMITS.numeric).default(DEFAULTS.max_concurrency),

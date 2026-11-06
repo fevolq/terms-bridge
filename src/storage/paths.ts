@@ -19,6 +19,11 @@ export function generatedName(source = ''): string {
   const extension = /^\.[a-z0-9]{1,16}$/i.test(extname(source)) ? extname(source).toLowerCase() : '';
   return `${Math.floor(Date.now() / 1000)}_${suffix}${extension}`;
 }
+/** Rebuild the saved workspace path without following a replacement symlink. */
+export async function restoreWorkspaceDirectory(path: string): Promise<void> {
+  await mkdir(path, { recursive: true });
+  if (pathIdentity(await realpath(path)) !== pathIdentity(path)) throw new Error('Workspace directory changed to a symbolic link');
+}
 export async function directory(root: string, parts: string[], create = false): Promise<string> {
   let path = await realpath(root);
   for (const part of parts) {

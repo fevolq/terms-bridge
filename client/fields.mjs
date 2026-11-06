@@ -5,7 +5,7 @@ export const DEFAULT_PROJECT = { ...DEFAULTS, name: '', workspace_path: '', prov
   max_concurrency: '', callback_url: '', request_token: '', callback_headers: '' };
 export const FIELDS = [
   { name: 'name', label: '项目名称', placeholder: '例如：新闻摘要服务' },
-  { name: 'workspace_path', label: '工作区路径', wide: true, placeholder: '例如：~/Documents/test', hint: '可留空：在 dsh 默认工作区的同级目录自动创建以项目 ID 命名的文件夹。' },
+  { name: 'workspace_path', label: '工作区路径', wide: true, placeholder: '例如：~/Documents/test', hint: '可留空：按 dsh 的 Documents 目录配置自动创建以项目 ID 命名的文件夹。' },
   { name: 'provider', label: '模型提供方', required: true, hidden: true },
   { name: 'model', label: '模型', required: true, wide: true },
   { name: 'agent_preset', label: 'Agent 预设', required: true },
@@ -29,7 +29,7 @@ export function validateDraft(draft) {
     if (!PROJECT_ID.test(id)) fail('id', '使用 1–64 位小写字母、数字、短横线或下划线，首位为字母或数字。');
     if (ids.has(id)) fail('id', '项目 ID 不能重复。');
     ids.add(id);
-    const project = {};
+    const project = row.created_at ? { created_at: row.created_at } : {};
     for (const field of FIELDS) {
       const raw = String(row[field.name] ?? ''), text = field.secret ? raw : raw.trim();
       if (field.min !== undefined) {

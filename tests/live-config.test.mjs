@@ -40,7 +40,7 @@ test('adding and updating projects keeps active sessions, queued snapshots, call
   const old = structuredClone(f.projects.get('news'));
   await f.engine.reconfigure(new Map([
     ['news', { ...old, model: 'new-model', permission_mode: 'auto', callback_url: 'https://new.example/results', callback_headers: { Authorization: 'Bearer new-callback-token' }, max_execution_retries: 0 }],
-    ['other', { ...old, workspace_id: 'workspace-2', workspace_path: '/other-project' }],
+    ['other', { ...old, workspace_path: '/other-project' }],
   ]));
   assert.equal(started[0].signal.aborted, false);
   assert.equal(f.record('running').execution.session_id, started[0].record.execution.session_id);
@@ -66,7 +66,7 @@ test('invalid removals and route activation failures cannot partially replace th
   const f = await fixture(); await f.engine.accept(request());
   const old = structuredClone(f.projects.get('news'));
   await assert.rejects(f.engine.reconfigure(new Map()), /Active tasks/);
-  await assert.rejects(f.engine.reconfigure(new Map([['news', { ...old, workspace_id: 'different' }]])), /Active tasks/);
+  await assert.rejects(f.engine.reconfigure(new Map([['news', { ...old, workspace_path: old.workspace_path + '/different' }]])), /Active tasks/);
   await assert.rejects(f.engine.reconfigure(new Map([['news', { ...old, model: 'new' }]]), () => { throw new Error('route conflict'); }), /route conflict/);
   assert.deepEqual(f.projects.get('news'), old);
   assert.equal(f.engine.available, true); await f.engine.close();
@@ -77,7 +77,7 @@ test('live config serializes updates, preserves the last working registry after 
   const gate = deferred(); const applied = []; const errors = [];
   let fail = false;
   const template = (await fixture()).projects.get('news');
-  const { workspace_id, ...project } = template;
+  const project = template;
   const live = new LiveConfig(() => ({ projects: value }), parseConfig({}), async config => {
     if (applied.length === 0) await gate.promise;
     if (fail) throw new Error('invalid workspace');
@@ -93,4 +93,27 @@ test('live config serializes updates, preserves the last working registry after 
   assert.equal(errors.length, 1); assert.equal(applied.length, 2);
   fail = false; await live.refresh(true); assert.deepEqual(Object.keys(applied.at(-1).projects), ['third']);
   await live.close(); value = {}; await live.refresh(); assert.equal(applied.length, 3);
+});
+
+test('pending configuration persistence leaves running tasks intact and rejects new admissions until it settles', async t => {
+  const taskGate = deferred(), saveGate = deferred(); let started, saving = false;
+  const f = await fixture({ run: async (task, signal) => { started = { task, signal }; await taskGate.promise; return { result: 'finished', files: [] }; } });
+  t.after(async () => { taskGate.resolve(); saveGate.resolve(); await f.engine.close(); });
+  await f.engine.accept(request('running')); f.engine.tick(); await until(() => started);
+  const original = structuredClone(f.projects.get('news'));
+  const update = f.engine.reconfigure(new Map([['news', { ...original, model: 'updated' }]]), async () => {
+    saving = true; await saveGate.promise; throw new Error('binding persistence failed');
+  });
+  const rejected = assert.rejects(update, /binding persistence failed/);
+  await until(() => saving);
+  await assert.rejects(f.engine.accept(request('during-save')), error => error.code === 'SERVICE_UNAVAILABLE');
+  assert.equal(started.signal.aborted, false);
+  taskGate.resolve(); await f.engine.settle();
+  assert.equal(f.record('running').status, 'completed');
+  assert.deepEqual(f.record('running').project, original);
+  saveGate.resolve(); await rejected;
+  assert.equal(f.engine.available, true);
+  assert.deepEqual(f.projects.get('news'), original);
+  await f.engine.accept(request('after-failure'));
+  assert.deepEqual(f.record('after-failure').project, original);
 });

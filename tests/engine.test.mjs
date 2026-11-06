@@ -142,7 +142,7 @@ test('persisted interrupted final attempts fail without receiving extra retry bu
 test('two projects route their own model, workspace and callbacks', async () => {
   const seen = []; const callbacks = [];
   const f = await fixture({ run: async (r, ...args) => { seen.push(r.project); return successRun(r, ...args); }, callback: async r => { callbacks.push(r.project.callback_url); return null; } });
-  f.projects.set('other', { ...project({ model: 'other-model', callback_url: 'http://localhost/other' }), workspace_id: 'other-workspace' });
+  f.projects.set('other', { ...project({ model: 'other-model', callback_url: 'http://localhost/other' }) });
   await f.engine.accept(request()); await f.engine.accept(request('task-1', 'other')); await f.cycle(); await f.cycle();
   assert.deepEqual(seen.map(p => p.model).sort(), ['other-model', 'test-model']);
   assert.deepEqual(callbacks.sort(), ['http://localhost/callback', 'http://localhost/other']);

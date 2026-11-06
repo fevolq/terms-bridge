@@ -2,13 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
-import { mkdtemp, writeFile, mkdir, readFile } from 'node:fs/promises';
+import { mkdtemp, writeFile, mkdir, readFile, rmdir, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createEditor } from '../client/model.mjs';
 import { settingsForm } from '../client/transport.mjs';
 
-test('real profile editor permits repeated names, blocks repeated paths and preserves unrelated settings', {skip:!process.env.DSH_TEST_PACKAGE}, async t=>{
+test('real profile editor saves automatic projects on the first attempt and preserves unrelated settings', {skip:!process.env.DSH_TEST_PACKAGE}, async t=>{
  const requireHost=createRequire(process.env.DSH_TEST_PACKAGE);
  const load=name=>import(pathToFileURL(requireHost.resolve('@deepseek-ai/'+name)));
  const {boot,readProfilePatches}=await load('dsh-app-boot');const {Service}=await load('cordis');
@@ -24,8 +24,7 @@ test('real profile editor permits repeated names, blocks repeated paths and pres
  import { MemoryTable } from '${new URL('./helpers.mjs',import.meta.url)}';
  export const bindings = new Map();
  export function apply(ctx){
-   const workspaceRegistry={list:()=>${JSON.stringify([{id:'default',path:defaultWorkspace,title:'default-workspace'},{id:'taken',path:taken,title:'占用名称'}])}};
-   ctx.effect(()=>watchProjectConfig({fiber:ctx.fiber,on:ctx.on.bind(ctx),workspaceRegistry},bindings,new TaskStore(new MemoryTable(), new MemoryTable())));
+   ctx.effect(()=>watchProjectConfig({fiber:ctx.fiber,on:ctx.on.bind(ctx)},bindings,new TaskStore(new MemoryTable(), new MemoryTable())));
  }`);
  await writeFile(join(dir,'other.mjs'),`import Schema from '${pathToFileURL(requireHost.resolve('@deepseek-ai/schemastery'))}';export const Config=Schema.object({enabled:Schema.boolean().default(false).volatile()});export function apply(){}`);
  const patches=[{insert:[{id:'terms-bridge',name:pathToFileURL(join(dir,'bridge.mjs')).href},{id:'other-plugin',name:pathToFileURL(join(dir,'other.mjs')).href},...['dsh-config-editor','dsh-settings'].map(name=>({id:name,name:pathToFileURL(requireHost.resolve('@deepseek-ai/'+name)).href}))]}];
@@ -44,14 +43,15 @@ test('real profile editor permits repeated names, blocks repeated paths and pres
  const {bindings}=await import(pathToFileURL(join(dir,'bridge.mjs')));
  const boundPath=join(dir,'gen-image');await mkdir(boundPath);
  bindings.set('gen-image',{workspace_path:boundPath});
- const saved=await readFile(profile.patchPath,'utf8');
- await assert.rejects(ctx.settings.mutate('terms-bridge',[{op:'set',path:['projects','gen-image','workspace_path'],value:fresh}],after.revision),/工作区路径保存后不可修改/);
- assert.equal(await readFile(profile.patchPath,'utf8'),saved);
  const extra={...projects['gen-image'],name:'新增',workspace_path:fresh};
+ const saved=await readFile(profile.patchPath,'utf8');
  const duplicate={...projects,added:{...extra,workspace_path:boundPath+'/../gen-image'}};
  await assert.rejects(ctx.settings.mutate('terms-bridge',[{op:'set',path:['projects'],value:duplicate}],after.revision),/工作区路径.*重复/);
  assert.equal(await readFile(profile.patchPath,'utf8'),saved);
- assert.equal(ctx.settings.describe().find(x=>x.ns==='terms-bridge').value.projects.added,undefined);
+ // Editing an existing project must not inspect or recreate its missing directory.
+ await rmdir(boundPath);
+ await ctx.settings.mutate('terms-bridge',[{op:'set',path:['projects','gen-image','model'],value:'updated-model'}],after.revision);
+ await assert.rejects(stat(boundPath),{code:'ENOENT'});
  const revision=ctx.settings.describe().find(x=>x.ns==='terms-bridge').revision;
  await ctx.settings.mutate('terms-bridge',[{op:'set',path:['projects'],value:{...projects,
    added:{...extra,name:'生图',workspace_path:taken},

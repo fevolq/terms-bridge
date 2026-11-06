@@ -38,7 +38,7 @@ test('one conversation admits only one concurrent chat; identical chat IDs remai
   assert.equal(responses.filter(r => r.status === 'fulfilled').length, 1);
   assert.equal(responses.filter(r => r.status === 'rejected' && r.reason.status === 409 && r.reason.code === 'CONVERSATION_BUSY').length, 11);
   await f.engine.accept(request('different', 'news', 'chat-0'));
-  f.projects.set('other', { ...project(), workspace_id: 'other' });
+  f.projects.set('other', { ...project() });
   await f.engine.accept(request('same', 'other', 'chat-0'));
   assert.equal(new Set(f.store.list().map(([, task]) => task.execution.session_id)).size, 3);
 });
@@ -110,8 +110,41 @@ test('failed task admission leaves a reusable binding, not a permanently busy co
 
 test('a conversation cannot be silently rebound to a different project workspace', async () => {
   const f = await fixture({ run: successRun }); await f.engine.accept(request()); await f.cycle(); await f.cycle();
-  await f.engine.reconfigure(new Map([['news', { ...f.projects.get('news'), workspace_id: 'different' }]]));
+  await f.engine.reconfigure(new Map([['news', { ...f.projects.get('news'), workspace_path: f.projects.get('news').workspace_path + '/different' }]]));
   await assert.rejects(f.engine.accept(request('task-1', 'news', 'next')), e => e.code === 'CONVERSATION_WORKSPACE_CHANGED');
+});
+
+test('re-registering the same directory preserves queued tasks, retries, callbacks and conversation recovery', async t => {
+  const f = await fixture({ run: async task => {
+    if (task.request.metadata.conversation_id === 'retry') throw new Error('Transient execution failure');
+    return successRun();
+  }, callback: async () => 'HTTP 503' });
+  t.after(() => f.engine.close());
+  await f.engine.accept(request('finished')); await f.cycle(); await f.cycle();
+  const finished = f.record('finished');
+  assert.equal(finished.delivery.status, 'retrying');
+  await f.engine.accept(request('retry')); await f.cycle();
+  assert.equal(f.record('retry').status, 'retrying');
+  await f.engine.accept(request('queued'));
+  const projects = new Map([['news', { ...f.projects.get('news') }]]);
+  await f.engine.reconfigure(projects);
+  await f.engine.close();
+
+  const engine = new TaskEngine(f.store, projects, successRun, { files: f.files, callback: async () => null,
+    now: () => Date.parse('2026-10-30T00:02:00Z') });
+  t.after(() => engine.close());
+  await engine.recover();
+  await engine.accept(request('finished', 'news', 'next'));
+  for (let index = 0; index < 4; index++) { engine.tick(); await engine.settle(); }
+  for (const [conversation, chat] of [['queued', 'chat-1'], ['retry', 'chat-1'], ['finished', 'next']]) {
+    assert.equal(f.record(conversation, chat).status, 'completed');
+  }
+  assert.equal(f.record('retry').execution.attempts, 2);
+  assert.equal(f.record('queued').execution.attempts, 1);
+  assert.equal(f.record('finished', 'next').execution.session_id, finished.execution.session_id);
+  assert.equal(f.record('finished').callback_body, finished.callback_body);
+  assert.equal(f.record('finished').delivery.status, 'delivered');
+  f.store.assertProjects(projects);
 });
 
 test('HTTP returns generated metadata and a complete query URL, rejects duplicates and removes the old route', async t => {
@@ -244,4 +277,19 @@ test('session creation is persisted once per conversation and survives further c
   assert.deepEqual([...g.conversationTable.entries()], saved);
   assert.deepEqual(snapshots, [false, true, true]);
   for (const [, record] of g.store.list()) { assert.equal('session_created' in record.execution, false); recordSchema.parse(record); }
+});
+
+test('legacy workspace IDs are discarded at storage decoding and are absent from new records', async () => {
+  const { domainSpec, recordSchema } = await import('../dist/storage/tasks.js');
+  const { conversationSchema } = await import('../dist/storage/conversations.js');
+  const f = await fixture({ run: successRun });
+  try {
+    await f.engine.accept(request());
+    const record = f.record(), conversation = f.store.conversations.get(request().metadata);
+    assert.equal('workspace_id' in record.project, false);
+    assert.equal('workspace_id' in conversation, false);
+    assert.deepEqual(recordSchema.parse({ ...record, project: { ...record.project, workspace_id: 'old' } }), record);
+    assert.deepEqual(conversationSchema.parse({ ...conversation, workspace_id: 'old' }), conversation);
+    assert.deepEqual(domainSpec.tables.projects.valueSchema.parse({ news: { workspace_path: '/saved', workspace_id: 'old' } }), { news: { workspace_path: '/saved' } });
+  } finally { await f.engine.close(); }
 });

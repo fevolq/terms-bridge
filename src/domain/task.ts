@@ -7,8 +7,10 @@ export const executing = (task: TaskRecord): boolean => ['queued', 'running', 'r
 export const active = (task: TaskRecord): boolean => executing(task) ||
   task.status === 'completed' && ['pending', 'retrying'].includes(task.delivery.status);
 export function queued(request: TaskRequest, project: ResolvedProject, files: UploadedFile[], now: number, conversation: ConversationRecord): TaskRecord {
+  // The original setting belongs to the project binding; a task only needs its actual path.
+  const { configured_path, ...snapshot } = project;
   return {
-    request: structuredClone(request), project: structuredClone(project), files, status: 'queued',
+    request: structuredClone(request), project: structuredClone(snapshot), files, status: 'queued',
     execution: { attempts: 0, attempt_id: null, session_id: conversation.session_id, next_retry_at: null, last_error: null },
     delivery: { status: 'not_ready', attempts: 0, next_retry_at: null, last_error: null, in_flight: false },
     created_at: at(now), completed_at: null, delivered_at: null, callback_body: null,

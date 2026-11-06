@@ -24,6 +24,7 @@ export class MemoryTable {
   async put(key, value) { if (this.failWrites) throw new Error('disk unavailable'); this.records.set(key, structuredClone(value)); }
   update(key, fn) {
     const work = this.chain.catch(() => {}).then(async () => {
+      if (!this.records.has(key)) throw new Error(`missing record: ${key}`);
       const result = fn(this.get(key)); await this.put(key, result); return structuredClone(result);
     });
     this.chain = work; return work;
@@ -33,14 +34,14 @@ export function request(id = 'task-1', project = 'news', chat = 'chat-1') {
   return { metadata: { project_id: project, conversation_id: id, chat_id: chat }, instruction: 'Summarize input.', files: [] };
 }
 export function conversation() {
-  return { project_id: 'news', conversation_id: 'task-1', session_id: randomUUID(), workspace_id: 'workspace-1', workspace_path: process.cwd(), created: false, deleted: false };
+  return { project_id: 'news', conversation_id: 'task-1', session_id: randomUUID(), workspace_path: process.cwd(), created: false, deleted: false };
 }
 export function project(overrides = {}) {
   const p = parseConfig({ projects: { news: {
     workspace_path: process.cwd(), provider: 'test', model: 'test-model', max_concurrency: 2,
     callback_url: 'http://localhost/callback', request_token: 'test-request-token', ...overrides,
   } } }).projects.news;
-  return { ...p, workspace_id: 'workspace-1' };
+  return p;
 }
 export async function fixture({ run = async () => {}, callback = async () => null, overrides = {}, table = new MemoryTable(), conversationTable = new MemoryTable(), files = new FileLibrary(), sessionExists, sessionBusy, transferOptions } = {}) {
   let time = Date.parse('2026-10-30T00:00:00Z');

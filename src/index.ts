@@ -1,12 +1,13 @@
 import { ApiError } from './domain/request.js';
-import { Config, readConfig, watchProjectConfig } from './dsh/settings.js';
+import { Config, readConfig, watchProjectConfig, initializeProjectTimestamps } from './dsh/settings.js';
 import { makeRunner } from './dsh/runner.js';
 import { agentBusy } from './dsh/sessions.js';
 import { sessionModels } from './dsh/models.js';
 import { exposeWorkspaces } from './dsh/workspaces.js';
 import type { Host } from './dsh/host.js';
 import { parseConfig } from './projects/config.js';
-import { resolveProjects } from './projects/workspaces.js';
+import { ProjectWorkspaces } from './projects/workspaces.js';
+import { createWorkspaceDirectory } from './dsh/directories.js';
 import { LiveConfig } from './projects/live.js';
 import { FileLibrary } from './storage/files.js';
 import { domainSpec, TaskStore } from './storage/tasks.js';
@@ -17,7 +18,7 @@ import { sendCallback } from './http/callback.js';
 
 export { Config };
 export const name = 'terms-bridge';
-export const inject = ['webServer', 'agents', 'sessionController', 'permissionPresets', 'workspaceRegistry', 'storageDomain', 'sessionPersistence', 'sessionProjections', 'attachments', 'typert'];
+export const inject = ['webServer', 'agents', 'sessionController', 'permissionPresets', 'workspaceRegistry', 'workspaceController', 'pluginPackages', 'storageDomain', 'sessionPersistence', 'sessionProjections', 'attachments', 'typert'];
 export async function apply(host: Host, raw: unknown): Promise<void> {
   const required = [host.webServer?.register, host.agents?.get, host.sessionController?.create, host.sessionController?.resolveAgent,
     host.permissionPresets?.set, host.workspaceRegistry?.list, host.workspaceRegistry?.create, host.sessionPersistence?.stat, host.sessionProjections?.stateOf,
@@ -39,10 +40,14 @@ export async function apply(host: Host, raw: unknown): Promise<void> {
   };
   host.effect(() => close);
   try {
-    const projects = await resolveProjects(host, initial);
+    const directory = createWorkspaceDirectory(host);
     if (closed) throw new Error('Plugin closed during initialization');
+    const workspaces = new ProjectWorkspaces(host, domain.table('projects'), directory);
+    await workspaces.load(initial);
+    const projects = workspaces.projects;
     tasks = new TaskEngine(store, projects, makeRunner(host, library), {
       files: library, callback: sendCallback, log: text => log?.error(text),
+      prepareProject: (id, signal, beforeRelocate) => workspaces.prepare(id, signal, beforeRelocate),
       sessionExists: async id => (await host.sessionPersistence.stat(id)) !== undefined,
       sessionBusy: id => agentBusy(host.agents.get(id)),
     });
@@ -60,12 +65,13 @@ export async function apply(host: Host, raw: unknown): Promise<void> {
       }),
     });
     live = new LiveConfig(() => readConfig(raw), initial, async config => {
-      const next = await resolveProjects(host, config, projects);
       if (closed) return;
-      await tasks!.reconfigure(next, () => {
-        if (prefix === config.api_prefix) return;
-        const replacement = register(config.api_prefix);
-        route?.(); route = replacement; prefix = config.api_prefix;
+      await tasks!.reconfigure(() => workspaces.configure(config), async next => {
+        const replacement = prefix === config.api_prefix ? undefined : register(config.api_prefix);
+        try { await workspaces.save(next); }
+        catch (error) { replacement?.(); throw error; }
+        if (closed) { replacement?.(); return; }
+        if (replacement) { route?.(); route = replacement; prefix = config.api_prefix; }
       });
     }, error => log?.error(`Project configuration update failed: ${error instanceof Error ? error.message : 'unknown error'}`));
     route = register(prefix);
@@ -74,6 +80,7 @@ export async function apply(host: Host, raw: unknown): Promise<void> {
     timer = setInterval(() => { void live!.refresh().catch(() => {}); }, 250);
     timer.unref();
     await live.refresh(); tasks.start();
+    initializeProjectTimestamps(host, raw);
     log?.info(`terms-bridge active: ${prefix}`);
   } catch (error) { await close(); throw error; }
 }

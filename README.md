@@ -16,7 +16,7 @@ dsh plugin --profile web add @fevolq/terms-bridge
 dsh plugin --profile web update @fevolq/terms-bridge --latest
 ```
 
-请将 `web` 替换为实际使用的 profile。安装或更新后，重新加载插件或重启对应的 dsh 实例，再进入「设置 → 项目接入」配置项目。
+请将 `web` 替换为实际使用的 profile。安装或更新后，重启对应的 dsh 实例以加载新代码，再进入「设置 → 项目接入」配置项目。
 
 本地安装、源码构建、项目配置和接口协议见[使用说明](docs/usage.md)，可运行的接入示例见 [examples](examples)。
 

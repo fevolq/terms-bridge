@@ -253,3 +253,46 @@ test('real dsh settings exposes the plugin fields and native mutations keep capt
   assert.deepEqual(atStartup.projects, {});
   await assert.rejects(ctx.settings.mutate('terms-bridge', [{ op: 'set', path: ['projects'], value: {} }], before.revision), /changed|revision|conflict/i);
 });
+
+
+test('projects sort newest first regardless of numeric IDs and keep undated projects stable', () => {
+  const { form } = formFixture();
+  const entry = created_at => ({ ...project, callback_headers: {}, ...(created_at ? { created_at } : {}) });
+  form.change({ value: { ...DEFAULT_CONFIG, projects: {
+    '1': entry('2020-01-01T00:00:00.000Z'),
+    '111': entry('2022-01-01T00:00:00.000Z'),
+    test: entry('2021-01-01T00:00:00.000Z'),
+    legacyA: entry(), legacyB: entry(),
+  } } });
+  const editor = createEditor(form);
+  assert.deepEqual(editor.getSnapshot().draft.rows.map(row => row.id), ['111', 'test', '1', 'legacyA', 'legacyB']);
+  editor.dispose();
+});
+
+test('new project creation time survives native config, saving, editing and reopening', async () => {
+  const { form, writes } = formFixture();
+  form.change({ value: { ...DEFAULT_CONFIG, projects: {
+    '1': { ...project, callback_headers: {}, created_at: '2020-01-01T00:00:00.000Z' },
+  } } });
+  const editor = createEditor(form);
+  const before = Date.now();
+  const key = addValid(editor, '2');
+  editor.project(key, 'workspace_path', '');
+  const created = editor.getSnapshot().draft.rows[0];
+  assert.equal(created.id, '2');
+  assert.ok(Date.parse(created.created_at) >= before && Date.parse(created.created_at) <= Date.now());
+  assert.equal(await editor.save(), true);
+  const saved = form.getSnapshot().value;
+  assert.equal(parseConfig(readConfig(Config(saved))).projects['2'].created_at, created.created_at);
+  assert.deepEqual(editor.getSnapshot().draft.rows.map(row => row.id), ['2', '1']);
+  const older = editor.getSnapshot().draft.rows.find(row => row.id === '1');
+  editor.project(older.key, 'name', 'Renamed');
+  assert.equal(await editor.save(), true);
+  assert.ok(writes.at(-1).every(op => op.path.at(-1) !== 'created_at'));
+  assert.equal(form.getSnapshot().value.projects['1'].created_at, '2020-01-01T00:00:00.000Z');
+  editor.dispose();
+  const reopened = createEditor(form);
+  assert.deepEqual(reopened.getSnapshot().draft.rows.map(row => row.id), ['2', '1']);
+  assert.equal(reopened.getSnapshot().draft.rows[0].created_at, created.created_at);
+  reopened.dispose();
+});

@@ -6,11 +6,11 @@ import { CONVERSATION_ID, PROJECT_ID } from '../shared/rules.js';
 
 export const conversationSchema = z.object({
   project_id: z.string().regex(PROJECT_ID), conversation_id: z.string().regex(CONVERSATION_ID),
-  session_id: z.string().uuid(), workspace_id: z.string().min(1), workspace_path: z.string().min(1),
+  session_id: z.string().uuid(), workspace_id: z.string().optional(), workspace_path: z.string().min(1),
   created: z.boolean(), deleted: z.boolean(),
-}).strict();
+}).strict().transform(({ workspace_id, ...record }) => record);
 
-/** Durable identity only; dsh owns history. Admission holds the conversation lock. */
+/** Durable identity only; dsh owns history. Admission holds the project lock. */
 export class ConversationStore {
   constructor(private table: Table<ConversationRecord>) {}
   get(metadata: Pick<TaskMetadata, 'project_id' | 'conversation_id'>): ConversationRecord | undefined {
@@ -19,13 +19,14 @@ export class ConversationStore {
   async ensure(metadata: TaskMetadata, project: ResolvedProject): Promise<ConversationRecord> {
     const existing = this.get(metadata);
     if (existing) {
-      if (existing.workspace_id !== project.workspace_id || existing.workspace_path !== project.workspace_path) {
+      // Removing a DSH registration changes its ID, not the conversation's directory.
+      if (existing.workspace_path !== project.workspace_path) {
         throw new ApiError(409, 'CONVERSATION_WORKSPACE_CHANGED', 'Conversation belongs to its original workspace', metadata);
       }
       return existing;
     }
     const conversation: ConversationRecord = { project_id: metadata.project_id, conversation_id: metadata.conversation_id,
-      session_id: randomUUID(), workspace_id: project.workspace_id, workspace_path: project.workspace_path, created: false, deleted: false };
+      session_id: randomUUID(), workspace_path: project.workspace_path, created: false, deleted: false };
     await this.table.put(conversationKey(metadata.project_id, metadata.conversation_id), conversation);
     return conversation;
   }

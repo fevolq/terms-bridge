@@ -1,8 +1,10 @@
+import { ProjectWorkspaces, saveProjectWorkspaces } from '../dist/projects/workspaces.js';
+import { MemoryTable } from './helpers.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
-import { mkdtemp, mkdir, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, stat } from 'node:fs/promises';
 import { join, relative, isAbsolute } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fixture, request, deferred, until } from './helpers.mjs';
@@ -77,7 +79,9 @@ test('native followups retain the original preset and reuse an idle history runt
   f = await fixture({ run, sessionExists: async id => (await ctx.sessionPersistence.stat(id)) !== undefined,
     sessionBusy: id => agentBusy(ctx.agents.get(id)),
     overrides: { workspace_path: workspace.path, agent_preset: 'test-default', model: 'first-model' } });
-  f.projects.set('news', { ...f.projects.get('news'), workspace_id: workspace.id });
+  const bindings = new MemoryTable(); await saveProjectWorkspaces(bindings, f.projects);
+  const workspaces = new ProjectWorkspaces(ctx, bindings, () => root, f.projects);
+  f.engine.ports.prepareProject = (id, signal, beforeRelocate) => workspaces.prepare(id, signal, beforeRelocate);
   const configure = patch => f.engine.reconfigure(new Map([['news', { ...f.projects.get('news'), ...patch }]]));
   async function submit(conversation, chat) {
     await f.engine.accept(request(conversation, 'news', chat)); await f.cycle();
@@ -93,7 +97,34 @@ test('native followups retain the original preset and reuse an idle history runt
   assert.deepEqual(creations.at(-1), { mounted: 'test-default', recorded: 'test-default' });
   assert.match(calls.at(-1).history, /reply:first-model/);
   assert.equal(calls.at(-1).model, 'second-model');
+
+  // Removing the native registration retains the directory and session logs.
+  // Execution reports a missing registration; only a new upload/submission restores it.
+  await f.engine.accept(request('original', 'news', 'queued-before-workspace-removal'));
+  await ctx.workspaceRegistry.delete(workspace.id);
+  assert.equal((await stat(workspacePath)).isDirectory(), true);
+  assert.ok(await ctx.sessionPersistence.stat(sessionId));
+  await f.cycle();
+  let queued = f.record('original', 'queued-before-workspace-removal');
+  assert.equal(queued.status, 'retrying');
+  assert.equal(await ctx.workspaceRegistry.resolveByPath(workspacePath), undefined);
+  await f.engine.upload('news', prepare => prepare(f.engine.stop.signal));
+  f.advance(queued.project.retry_interval_seconds * 1000); await f.cycle();
+  queued = f.record('original', 'queued-before-workspace-removal');
+  assert.equal(queued.status, 'completed', queued.execution.last_error);
+  assert.equal(queued.execution.attempts, 2);
+  assert.equal(queued.execution.session_id, sessionId);
+  const recreated = await ctx.workspaceRegistry.resolveByPath(workspacePath);
+  assert.notEqual(recreated.id, workspace.id);
+  assert.ok(recreated.sessionIds.includes(sessionId));
+  await submit('original', 'after-workspace-recreation');
+  assert.equal(f.record('original', 'after-workspace-recreation').execution.session_id, sessionId);
+  // A new conversation must also work if registration disappears before admission.
+  await ctx.workspaceRegistry.delete(recreated.id);
   await submit('new-conversation', 'first');
+  const latestWorkspace = await ctx.workspaceRegistry.resolveByPath(workspacePath);
+  assert.notEqual(latestWorkspace.id, recreated.id);
+  assert.ok(latestWorkspace.sessionIds.includes(f.record('new-conversation', 'first').execution.session_id));
   assert.deepEqual(creations.at(-1), { mounted: 'test-specific', recorded: 'test-specific' });
   // Even an unavailable new project preset must not prevent resuming the existing one.
   await configure({ agent_preset: 'missing-preset', model: 'third-model' });

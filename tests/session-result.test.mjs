@@ -87,7 +87,7 @@ test('file-card-only replies reach callbacks and downloads without collecting in
   const host = {
     sessionPersistence: { stat: async () => undefined },
     permissionPresets: { set() {} },
-    workspaceRegistry: { create: async () => ({ id: 'workspace-1', path: workspace, attachSession: async () => {} }) },
+    workspaceRegistry: { list: () => [{ id: 'workspace-1', path: workspace, attachSession: async () => {} }] },
     ...fileTestSessions(options => fileTestAgent({ id: options.sessionId, followup(message) { events.splice(1, 0, { type: 'user/message', data: message }); }, cancel() {}, whenIdle: async () => {},
       session: { snapshotEvents: () => events } })),
   };
@@ -121,7 +121,7 @@ test('runner returns untouched final text and deduplicates files; no injected bu
     sessionPersistence: { stat: async () => undefined },
     permissionPresets: { set() {} },
     attachments: { imageHostPath: () => native },
-    workspaceRegistry: { create: async () => ({ id: record.project.workspace_id, path: workspace, attachSession: async () => {} }) },
+    workspaceRegistry: { list: () => [{ id: 'workspace-1', path: workspace, attachSession: async () => {} }] },
     ...fileTestSessions(() => fileTestAgent({
       id: 'session', followup: m => { message = m; }, whenIdle: async () => {}, cancel() {},
       session: { snapshotEvents: () => [{ type: 'turn/start', data: {} }, { type: 'user/message', data: message }, assistant([{ type: 'text', text: '中间' }]),
@@ -164,7 +164,7 @@ test('concurrent tasks retain published result bytes after a later overwrite', a
   const host = {
     sessionPersistence: { stat: async () => undefined },
     permissionPresets: { set() {} },
-    workspaceRegistry: { create: async () => ({ id: 'workspace-1', path: workspace, attachSession: async () => {} }) },
+    workspaceRegistry: { list: () => [{ id: 'workspace-1', path: workspace, attachSession: async () => {} }] },
     ...fileTestSessions(options => {
       let task, input;
       return fileTestAgent({

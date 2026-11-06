@@ -14,7 +14,7 @@ export function createEditor(form) {
       id, originalId: id, key: 'project-' + ++serial, request_token: '', tokenEdited: false,
       tokenSet: Boolean(project.request_token) || (snapshot.secrets ?? []).some(secret => secret.set && JSON.stringify(secret.path) === JSON.stringify(['projects', id, 'request_token'])),
       callback_headers: Object.keys(project.callback_headers ?? {}).length ? JSON.stringify(project.callback_headers, null, 2) : '',
-    }));
+    })).sort((a, b) => (Date.parse(b.created_at) || 0) - (Date.parse(a.created_at) || 0));
     publish({ draft: { ...config, rows }, revision: snapshot.revision, status: snapshot.status, writable: snapshot.writable,
       dirty: false, saved: false, conflict: false, errors: {}, message: '' });
   };
@@ -47,7 +47,7 @@ export function createEditor(form) {
     },
     add() {
       const key = 'project-' + ++serial;
-      edit({ ...state.draft, rows: [...state.draft.rows, { ...DEFAULT_PROJECT, id: '', key, agent_preset: preset }] });
+      edit({ ...state.draft, rows: [{ ...DEFAULT_PROJECT, id: '', key, agent_preset: preset, created_at: new Date().toISOString() }, ...state.draft.rows] });
       return key;
     },
     remove(key) { edit({ ...state.draft, rows: state.draft.rows.filter(row => row.key !== key) }); },

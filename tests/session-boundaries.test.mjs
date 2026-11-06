@@ -86,7 +86,7 @@ test('native task boundaries isolate UI work, file capture and cancellation', {
       sessionBusy: id => agentBusy(ctx.agents.get(id)),
       overrides: { workspace_path: workspace.path, agent_preset: 'test-default', model: 'project-model',
         execution_timeout_seconds: 10, max_execution_retries: 0, ...overrides } });
-    f.projects.set('news', { ...f.projects.get('news'), workspace_id: workspace.id }); fixtures.push(f); return f;
+    fixtures.push(f); return f;
   }
   async function submit(f, conversation, chat, prompt) {
     await f.engine.accept({ ...request(conversation, 'news', chat), instruction: prompt });

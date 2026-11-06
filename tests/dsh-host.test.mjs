@@ -1,9 +1,10 @@
 import test from 'node:test';
+import { mountNativeWorkspaces } from './native-workspaces.mjs';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
-import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises';
-import { basename, join } from 'node:path';
+import { mkdtemp, mkdir, readFile, writeFile, rename, stat } from 'node:fs/promises';
+import { basename, join, relative, isAbsolute } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { request, deferred, until } from './helpers.mjs';
@@ -121,6 +122,7 @@ test('installed dsh core executes task, persists workspace membership, collects 
   fibers.push(modelFiber); await modelFiber.await();
   await mount('dsh-agent-loop', { agents: [] });
   await mountNativeController(ctx, mount, load, dir, fibers, { provider: 'test-business', model: 'mock-business' });
+  const directory = await mountNativeWorkspaces(ctx, load, requireHost, dir);
   await mount('dsh-host-webserver', { host: '127.0.0.1', port: 0 });
   const origin = ctx.webServer.getOrigin(); let received; const callbackIds = [];
   const removeCallback = ctx.webServer.register({ kind: 'exact', path: '/test-callback', handler: async (req, res) => {
@@ -134,12 +136,17 @@ test('installed dsh core executes task, persists workspace membership, collects 
   const plugin = ctx.plugin(bridge, config); fibers.push(plugin); await plugin.await();
   assert.deepEqual(await ctx.termsBridge.workspaces(), { news: taskPath(workspace) });
   const prefix = origin + '/api/terms-bridge';
+  const initialWorkspace = await ctx.workspaceRegistry.resolveByPath(workspace);
+  assert.equal(initialWorkspace, undefined, 'startup must not register workspaces');
   const form = new FormData(); form.append('file', new Blob(['native attachment']), '原始 100%20.TXT');
   const upload = await fetch(prefix + '/projects/news/files', { method: 'POST', headers: { Authorization: 'Bearer isolated-host-token' }, body: form });
   assert.equal(upload.status, 201); const file = await upload.json();
+  const uploadedWorkspace = await ctx.workspaceRegistry.resolveByPath(workspace);
+  await ctx.workspaceRegistry.delete(uploadedWorkspace.id);
   const imageForm = new FormData(); imageForm.append('file', new Blob([png], { type: 'image/png' }), '原始 100%20.PNG');
   const imageUpload = await fetch(prefix + '/projects/news/files', { method: 'POST', headers: { Authorization: 'Bearer isolated-host-token' }, body: imageForm });
   assert.equal(imageUpload.status, 201); const image = await imageUpload.json();
+  assert.notEqual((await ctx.workspaceRegistry.resolveByPath(workspace)).id, uploadedWorkspace.id);
   const firstTask = { ...request(), files: [{ file_id: file.file_id }, { file_id: image.file_id }] };
   firstTask.instruction = `请阅读 @${image.file_id} 和 @${file.file_id} 之后完成任务。`;
   const response = await fetch(prefix + '/tasks', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer isolated-host-token' }, body: JSON.stringify(firstTask) });
@@ -207,7 +214,7 @@ test('installed dsh core executes task, persists workspace membership, collects 
   const running = await query('in-flight');
   const defaultWorkspace = join(dir, 'default-workspace'); await mkdir(defaultWorkspace);
   await ctx.workspaceRegistry.create(defaultWorkspace);
-  const secondWorkspace = join(dir, 'second');
+  const secondWorkspace = join(dir, 'deepseek-harness', 'second');
   const nextProjects = {
     news: { ...config.projects.news, model: 'new-business', max_execution_retries: 3 },
     second: { ...config.projects.news, workspace_path: undefined, request_token: undefined },
@@ -243,7 +250,7 @@ test('installed dsh core executes task, persists workspace membership, collects 
   assert.equal(ctx.workspaceRegistry.get(grouped.id), grouped);
   assert.ok(grouped.sessionIds.includes(task.execution.session_id));
   assert.equal(await readFile(join(workspace, '报告.txt'), 'utf8'), 'native result file');
-  validateProjectWorkspaces(ctx, parseConfig({ projects: nextProjects }), new Map());
+  validateProjectWorkspaces(parseConfig({ projects: nextProjects }), new Map(), directory);
   await set('projects', nextProjects);
   await until(async () => (await query('task-1')).delivery?.status === 'delivered');
   assert.equal(ctx.workspaceRegistry.list().filter(w => w.path === workspace).length, 1);
@@ -286,5 +293,25 @@ test('installed dsh core executes task, persists workspace membership, collects 
   assert.equal((await chat('third')).execution.session_id, task.execution.session_id);
   assert.equal((await chat('second')).result, 'native continuation result');
   assert.equal((await followup('second', 'duplicate with changed content')).status, 409);
+  // Removing the real directory still permits an explicit binding to be rebuilt in place.
+  const retained = join(dir, 'retained-workspace');
+  for (const target of [workspace, retained]) {
+    const child = relative(dir, target); assert(child && !child.startsWith('..') && !isAbsolute(child));
+  }
+  await rename(workspace, retained);
+  const registered = await ctx.workspaceRegistry.resolveByPath(retained);
+  assert.equal(registered, undefined);
+  await ctx.workspaceRegistry.delete(grouped.id);
+  const restoredForm = new FormData(); restoredForm.append('file', new Blob(['restored upload']), 'restored.txt');
+  const restoredUpload = await fetch(prefix + '/projects/news/files', { method: 'POST', headers: { Authorization: 'Bearer isolated-host-token' }, body: restoredForm });
+  assert.equal(restoredUpload.status, 201); await restoredUpload.json();
+  assert.ok(await ctx.workspaceRegistry.resolveByPath(workspace));
+  assert.equal((await followup('fourth', 'native-followup-after-directory-removal')).status, 202);
+  await until(async () => (await chat('fourth')).delivery?.status === 'delivered');
+  assert.equal((await chat('fourth')).execution.session_id, task.execution.session_id);
+  assert.equal((await stat(workspace)).isDirectory(), true);
+  const rebuilt = await ctx.workspaceRegistry.resolveByPath(workspace);
+  assert.ok(rebuilt.sessionIds.includes(task.execution.session_id));
+  assert.notEqual(rebuilt.id, grouped.id);
   function taskPath(path) { return path; }
 });

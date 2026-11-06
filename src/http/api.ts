@@ -81,9 +81,10 @@ export function handler(tasks: TaskEngine, prefix: string, files: FileTransfer, 
       method(req, res, rawKey ? 'GET' : 'POST');
       const id = identity(rawId!, PROJECT_ID), project = authorize(req, id);
       if (rawKey) {
-        await tasks.track(files.download(id, project, identity(rawKey, FILE_ID), res, tasks.stop.signal));
+        if (!project.workspace_path) throw new ApiError(404, 'FILE_NOT_FOUND', 'Project workspace has not been initialized');
+        await tasks.track(files.download(id, { ...project, workspace_path: project.workspace_path }, identity(rawKey, FILE_ID), res, tasks.stop.signal));
       } else {
-        respond(res, 201, await tasks.track(files.upload(req, id, project, tasks.stop.signal), true));
+        respond(res, 201, await tasks.upload(id, prepare => files.upload(req, id, prepare, tasks.stop.signal)));
       }
     } catch (error) {
       req.resume();

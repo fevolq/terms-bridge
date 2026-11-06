@@ -10,14 +10,14 @@ import { FileLibrary, type FileDraft } from '../storage/files.js';
 export class FileTransfer {
   private uploads = new Map<string, number>();
   constructor(private library: FileLibrary, private options: { maxFileBytes?: number; timeoutMs?: number } = {}) {}
-  async upload(req: IncomingMessage, id: string, project: ResolvedProject, stop: AbortSignal): Promise<UploadedFile> {
+  async upload(req: IncomingMessage, id: string, project: (signal: AbortSignal) => Promise<ResolvedProject>, stop: AbortSignal): Promise<UploadedFile> {
     const count = this.uploads.get(id) ?? 0;
     if (count >= LIMITS.uploadsPerProject || [...this.uploads.values()].reduce((a, b) => a + b, 0) >= LIMITS.uploads) throw new ApiError(429, 'UPLOAD_BUSY', 'At most 2 uploads per project and 8 overall');
     this.uploads.set(id, count + 1);
     try { return await this.receive(req, id, project, stop); }
     finally { this.uploads.set(id, this.uploads.get(id)! - 1); req.resume(); }
   }
-  private async receive(req: IncomingMessage, id: string, project: ResolvedProject, stop: AbortSignal): Promise<UploadedFile> {
+  private async receive(req: IncomingMessage, id: string, project: (signal: AbortSignal) => Promise<ResolvedProject>, stop: AbortSignal): Promise<UploadedFile> {
     const limit = this.options.maxFileBytes ?? LIMITS.file;
     if (!/^multipart\/form-data(?:\s*;|\s*$)/i.test(req.headers['content-type'] ?? '') || req.headers['content-encoding'] && req.headers['content-encoding'] !== 'identity') throw new ApiError(415, 'UNSUPPORTED_MEDIA_TYPE', 'Expected uncompressed multipart/form-data');
     if (Number(req.headers['content-length']) > limit + 65536) throw new ApiError(413, 'FILE_TOO_LARGE', 'Upload exceeds size limit');
@@ -25,6 +25,7 @@ export class FileTransfer {
     try { parser = busboy({ headers: req.headers, preservePath: true, defParamCharset: 'utf8', limits: { files: 1, fields: 0, parts: 2, headerPairs: 32, fileSize: limit + 1 } }); }
     catch { throw new ApiError(400, 'INVALID_UPLOAD', 'Invalid multipart boundary'); }
     const controller = new AbortController();
+    const signal = AbortSignal.any([stop, controller.signal]);
     let draft: FileDraft | undefined, writing: Promise<void> | undefined, size = 0;
     let reject!: (error: Error) => void;
     const parsed = new Promise<void>((resolve, fail) => { reject = fail; parser.once('finish', resolve); });
@@ -47,8 +48,10 @@ export class FileTransfer {
       }
       stream.on('limit', () => abort(new ApiError(413, 'FILE_TOO_LARGE', 'File exceeds size limit')));
       writing = (async () => {
-        draft = await this.library.stage(id, project, info.filename, info.mimeType);
-        await draft.write(stream, controller.signal, limit);
+        const destination = await project(signal);
+        signal.throwIfAborted();
+        draft = await this.library.stage(id, destination, info.filename, info.mimeType);
+        await draft.write(stream, signal, limit);
       })().catch(error => { abort(error instanceof ApiError ? error : new ApiError(503, 'FILE_STORAGE_ERROR', 'Could not save uploaded file')); });
     });
     stop.addEventListener('abort', interrupted, { once: true });
@@ -58,7 +61,7 @@ export class FileTransfer {
       await parsed; await writing;
       controller.signal.throwIfAborted();
       if (!draft) throw new ApiError(400, 'INVALID_UPLOAD', 'Exactly one file field is required');
-      return await draft.commit(AbortSignal.any([stop, controller.signal]));
+      return await draft.commit(signal);
     } finally {
       clearTimeout(timer); stop.removeEventListener('abort', interrupted);
       req.off('error', interrupted); req.off('aborted', interrupted); req.off('data', meter);

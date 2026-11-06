@@ -54,17 +54,16 @@ test('native initialization and model failures retry in the same conversation wi
   const path = join(root, 'business'); await mkdir(path); const workspace = await ctx.workspaceRegistry.create(path);
   for (const alwaysFail of [false, true]) {
     let attachments = 0;
-    const host = { agents: ctx.agents, sessionController: ctx.sessionController, sessionPersistence: ctx.sessionPersistence, sessionProjections: ctx.sessionProjections, permissionPresets: ctx.permissionPresets, workspaceRegistry: { create: async () => ({
+    const host = { agents: ctx.agents, sessionController: ctx.sessionController, sessionPersistence: ctx.sessionPersistence, sessionProjections: ctx.sessionProjections, permissionPresets: ctx.permissionPresets, workspaceRegistry: { list: () => [{
       id: workspace.id, path: workspace.path, async attachSession(id) {
         attachments++;
         assert.ok(await ctx.sessionPersistence.stat(id));
         if (alwaysFail || attachments === 1) throw new Error('Workspace registration temporarily unavailable');
         await workspace.attachSession(id);
       },
-    }) } };
+    }] } };
     const f = await fixture({ run: await makeRunner(host), sessionExists: async id => (await ctx.sessionPersistence.stat(id)) !== undefined,
       overrides: { workspace_path: workspace.path } });
-    f.projects.set('news', { ...f.projects.get('news'), workspace_id: workspace.id });
     try {
       await f.engine.accept(request()); await f.cycle();
       const first = f.record();
@@ -89,7 +88,6 @@ test('native initialization and model failures retry in the same conversation wi
   assert.equal(modelCalls, 1);
   const continued = await fixture({ run: makeRunner(ctx), sessionExists: async id => (await ctx.sessionPersistence.stat(id)) !== undefined,
     overrides: { workspace_path: workspace.path, max_execution_retries: 1 } });
-  continued.projects.set('news', { ...continued.projects.get('news'), workspace_id: workspace.id });
   try {
     await continued.engine.accept({ ...request('multi'), instruction: 'Remember the codeword: apricot.' });
     await continued.cycle(); assert.equal(continued.record('multi').status, 'completed');

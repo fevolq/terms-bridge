@@ -3,7 +3,7 @@ import { projectSchema } from '../projects/config.js';
 import { uploadedFileSchema } from '../domain/file.js';
 import { requestSchema, taskKey } from '../domain/request.js';
 import { active, executing } from '../domain/task.js';
-import { LIMITS } from '../shared/rules.js';
+import { LIMITS, PROJECT_ID } from '../shared/rules.js';
 import type { ConversationRecord, Table, TaskMetadata, TaskRecord } from '../domain/types.js';
 import { ConversationStore, conversationSchema } from './conversations.js';
 
@@ -11,7 +11,8 @@ const optionalTime = z.string().datetime().nullable();
 const count = z.number().int().nonnegative();
 export const recordSchema = z.object({
   request: requestSchema,
-  project: projectSchema.extend({ name: z.string().min(1), workspace_path: z.string().min(1), workspace_id: z.string().min(1) }),
+  project: projectSchema.extend({ name: z.string().min(1), workspace_path: z.string().min(1), workspace_id: z.string().optional() })
+    .transform(({ workspace_id, ...project }) => project),
   files: z.array(uploadedFileSchema).max(LIMITS.files), output_files: z.array(uploadedFileSchema).max(LIMITS.files).optional(),
   status: z.enum(['queued', 'running', 'retrying', 'completed', 'failed']),
   execution: z.object({ attempts: count, attempt_id: z.string().nullable(), session_id: z.string().uuid(),
@@ -41,7 +42,10 @@ export const recordSchema = z.object({
   for (const message of errors) context.addIssue({ code: 'custom', message });
 });
 export const domainSpec = { name: 'fevolq_terms_bridge_v2', version: 1, layout: 'single' as const,
-  tables: { tasks: { valueSchema: recordSchema }, conversations: { valueSchema: conversationSchema } } };
+  tables: { tasks: { valueSchema: recordSchema }, conversations: { valueSchema: conversationSchema },
+    projects: { valueSchema: z.record(z.string().regex(PROJECT_ID),
+      z.object({ workspace_id: z.string().optional(), workspace_path: z.string().min(1), configured_path: z.string().min(1).optional() })
+        .strict().transform(({ workspace_id, ...binding }) => binding)) } } };
 export class TaskStore {
   private admissions = new Map<string, Promise<unknown>>();
   readonly conversations: ConversationStore;
@@ -66,14 +70,14 @@ export class TaskStore {
     try { return await work; }
     finally { if (this.admissions.get(key) === work) this.admissions.delete(key); }
   }
-  assertProjects(projects: ReadonlyMap<string, { workspace_id: string; workspace_path: string }>): void {
+  assertProjects(projects: ReadonlyMap<string, { workspace_path?: string }>): void {
     this.conversations.validate();
     const busy = new Set<string>();
     for (const [key, task] of this.list()) {
       const { project_id, conversation_id, chat_id } = task.request.metadata;
       if (key !== taskKey(project_id, conversation_id, chat_id)) throw new Error('Task record key mismatch');
       const conversation = this.conversations.get(task.request.metadata);
-      if (!conversation || conversation.session_id !== task.execution.session_id || conversation.workspace_id !== task.project.workspace_id || conversation.workspace_path !== task.project.workspace_path) throw new Error('Task conversation binding mismatch');
+      if (!conversation || conversation.session_id !== task.execution.session_id || conversation.workspace_path !== task.project.workspace_path) throw new Error('Task conversation binding mismatch');
       if (conversation.deleted) continue;
       if (executing(task)) {
         if (busy.has(conversation.session_id)) throw new Error('Conversation has multiple unfinished tasks');
@@ -81,7 +85,7 @@ export class TaskStore {
       }
       if (!active(task)) continue;
       const project = projects.get(task.request.metadata.project_id);
-      if (!project || project.workspace_id !== task.project.workspace_id || project.workspace_path !== task.project.workspace_path) throw new Error('Active tasks require their configured project and original workspace');
+      if (!project || executing(task) && project.workspace_path !== task.project.workspace_path) throw new Error('Active tasks require their configured project and original workspace');
     }
   }
 }

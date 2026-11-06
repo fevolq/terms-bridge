@@ -52,8 +52,8 @@ export function makeRunner(host: Host, library = new FileLibrary()): Run {
     let turn: ReturnType<typeof sendTask> | undefined;
     try {
       signal.throwIfAborted();
-      const workspace = await host.workspaceRegistry.create(task.project.workspace_path, task.project.name);
-      if (workspace.id !== task.project.workspace_id) throw new Error('Workspace binding changed');
+      const workspace = host.workspaceRegistry.list().find(value => pathIdentity(value.path) === pathIdentity(task.project.workspace_path));
+      if (!workspace) throw new Error('Task workspace is no longer registered');
       const inputs = await prepareTaskFiles(task, signal, library);
       const content: ContentBlock[] = [{ type: 'text', text: replaceFiles(task.request.instruction, inputs) }];
       for (const file of inputs) {

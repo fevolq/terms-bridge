@@ -11,19 +11,23 @@ export interface UploadedFile {
   size: number; sha256: string; created_at: string;
 }
 export interface Project {
-  name: string; workspace_path?: string; provider: string; model: string;
+  name: string; created_at?: string; workspace_path?: string; provider: string; model: string;
   agent_preset?: string; permission_mode: typeof PERMISSIONS[number]; max_concurrency: number;
   callback_url: string; request_token?: string; callback_headers: Record<string, string>;
   max_execution_retries: number; execution_timeout_seconds: number;
   retry_interval_seconds: number; callback_timeout_seconds: number;
 }
 export interface PluginConfig { api_prefix: string; projects: Record<string, Project> }
-export interface ResolvedProject extends Project { workspace_id: string; workspace_path: string }
+/** The configured path remains stable even if recovery must bind a replacement. */
+export interface WorkspaceBinding { workspace_path: string; configured_path?: string }
+/** workspace_path is a resolved binding; configured_path retains the manual setting until first use. */
+export interface ProjectState extends Project { configured_path?: string }
+export interface ResolvedProject extends ProjectState { workspace_path: string }
 export type TaskStatus = 'queued' | 'running' | 'retrying' | 'completed' | 'failed';
 export type DeliveryStatus = 'not_ready' | 'pending' | 'retrying' | 'delivered' | 'failed';
 export interface ConversationRecord {
   project_id: string; conversation_id: string; session_id: string;
-  workspace_id: string; workspace_path: string; created: boolean; deleted: boolean;
+  workspace_path: string; created: boolean; deleted: boolean;
 }
 export interface TaskRecord {
   request: TaskRequest; project: ResolvedProject; status: TaskStatus;

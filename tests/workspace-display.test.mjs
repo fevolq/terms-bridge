@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { mountNativeWorkspaces } from './native-workspaces.mjs';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
@@ -28,11 +29,12 @@ test('native settings Remote reads applied project paths, not directory names or
   for (const name of ['default-workspace', 'other/news', 'manual']) await mkdir(join(dir, name), { recursive: true });
   await ctx.workspaceRegistry.create(join(dir, 'other/news'));
   await ctx.workspaceRegistry.create(join(dir, 'default-workspace'));
+  const directory = await mountNativeWorkspaces(ctx, load, requireHost, dir);
   const common = { provider: 'mock', model: 'mock', callback_url: 'http://localhost/results' };
   let config = parseConfig({ projects: { news: common, custom: { ...common, workspace_path: join(dir, 'manual') } } });
-  const projects = await resolveProjects(ctx, config);
+  const projects = await resolveProjects(ctx, config, undefined, directory);
   const plugin = ctx.plugin({ inject: ['typert', 'workspaceRegistry'], apply(host) { exposeWorkspaces(host, projects, async () => {
-    const next = await resolveProjects(host, config, projects);
+    const next = await resolveProjects(host, config, projects, directory);
     projects.clear(); for (const [id, project] of next) projects.set(id, project);
   }); } }); await plugin.await();
   const peer = { id: 'settings-test', ctx: ctx.extend(), principal: { kind: 'owner' }, signal: new AbortController().signal, interactions: 'none', dispose: async () => {} };
@@ -59,8 +61,8 @@ test('native settings Remote reads applied project paths, not directory names or
     }).await();
   } }).await();
   config = parseConfig({ projects: { added: common } });
-  assert.deepEqual(await ctx.typertGateway.invoke(request), { added: join(dir, 'added') });
-  assert.deepEqual(await readPaths(), { ok: true, value: { added: join(dir, 'added') } });
+  assert.deepEqual(await ctx.typertGateway.invoke(request), { added: join(dir, 'deepseek-harness', 'added') });
+  assert.deepEqual(await readPaths(), { ok: true, value: { added: join(dir, 'deepseek-harness', 'added') } });
   await assert.rejects(ctx.typertGateway.invoke({ ...request, peer: { ...peer, principal: { kind: 'guest' } } }), /access denied/);
   await plugin.dispose();
   await assert.rejects(ctx.typertGateway.invoke(request), /withdrawn|unavailable/);
