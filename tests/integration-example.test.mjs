@@ -73,7 +73,7 @@ test('documented Python client and durable callback receiver interoperate with r
       executions++;
       let result = callback.result; const paths = [];
       if (record.files?.length) {
-        const files = await prepareTaskFiles(record, signal);
+        const files = await prepareTaskFiles(record, signal, f.files);
         assert.match(await readFile(files[0].path, 'utf8'), /项目文件接入测试/);
         result = '文件读取完成';
       }

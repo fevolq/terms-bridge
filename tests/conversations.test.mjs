@@ -87,7 +87,7 @@ test('restart rebuilds admission from durable tasks and preserves session bindin
   const key = taskKey('news', 'task-1', 'chat-2');
   await f.store.update(key, task => ({ ...task, status: 'running', execution: { ...task.execution, attempts: 1, attempt_id: 'interrupted' } }));
   await f.engine.close();
-  const store = new TaskStore(f.table, f.conversationTable);
+  const store = new TaskStore(f.database);
   const engine = new TaskEngine(store, f.projects, successRun, { files: f.files, callback: async () => null, now: () => Date.now() + 60_000 });
   await engine.recover();
   assert.equal(store.get(key).status, 'retrying');
@@ -98,13 +98,14 @@ test('restart rebuilds admission from durable tasks and preserves session bindin
   await engine.close();
 });
 
-test('failed task admission leaves a reusable binding, not a permanently busy conversation', async () => {
+test('failed task admission rolls back the mapping and allows another submission', async () => {
   const f = await fixture(); f.table.failWrites = true;
   await assert.rejects(f.engine.accept(request()));
-  const session = f.store.conversations.get(request().metadata).session_id;
+  assert.equal(f.store.conversations.get(request().metadata), undefined);
+  assert.equal(f.store.list().length, 0);
   f.table.failWrites = false;
   await f.engine.accept(request());
-  assert.equal(f.record().execution.session_id, session);
+  assert.equal(f.record().execution.session_id, f.store.conversations.get(request().metadata).session_id);
   assert.equal(f.store.list().length, 1);
 });
 
@@ -271,25 +272,10 @@ test('session creation is persisted once per conversation and survives further c
   await f.engine.accept(request('task-1', 'news', 'next')); await f.cycle();
   assert.equal(f.record('task-1', 'next').status, 'completed');
   await f.engine.close();
-  const g = await fixture({ run, table: f.table, conversationTable: f.conversationTable }); t.after(() => g.engine.close());
+  const g = await fixture({ run, database: f.database }); t.after(() => g.engine.close());
   await g.engine.accept(request('task-1', 'news', 'after-reload')); await g.cycle();
   assert.equal(g.record('task-1', 'after-reload').status, 'completed');
   assert.deepEqual([...g.conversationTable.entries()], saved);
   assert.deepEqual(snapshots, [false, true, true]);
   for (const [, record] of g.store.list()) { assert.equal('session_created' in record.execution, false); recordSchema.parse(record); }
-});
-
-test('legacy workspace IDs are discarded at storage decoding and are absent from new records', async () => {
-  const { domainSpec, recordSchema } = await import('../dist/storage/tasks.js');
-  const { conversationSchema } = await import('../dist/storage/conversations.js');
-  const f = await fixture({ run: successRun });
-  try {
-    await f.engine.accept(request());
-    const record = f.record(), conversation = f.store.conversations.get(request().metadata);
-    assert.equal('workspace_id' in record.project, false);
-    assert.equal('workspace_id' in conversation, false);
-    assert.deepEqual(recordSchema.parse({ ...record, project: { ...record.project, workspace_id: 'old' } }), record);
-    assert.deepEqual(conversationSchema.parse({ ...conversation, workspace_id: 'old' }), conversation);
-    assert.deepEqual(domainSpec.tables.projects.valueSchema.parse({ news: { workspace_path: '/saved', workspace_id: 'old' } }), { news: { workspace_path: '/saved' } });
-  } finally { await f.engine.close(); }
 });

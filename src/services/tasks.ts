@@ -1,5 +1,5 @@
 import { ApiError, bytes, resolveMetadata, taskKey, validateRequest } from '../domain/request.js';
-import { beginDelivery, beginExecution, completed, executing, deliveryFinished, executionFailed, publicTask, queued } from '../domain/task.js';
+import { beginDelivery, beginExecution, completed, executing, deliveryFinished, executionFailed, publicTask } from '../domain/task.js';
 import { UnsettledExecutionError, type ProjectState, type ResolvedProject, type Run, type TaskMetadata, type TaskRecord, type UploadedFile } from '../domain/types.js';
 import { LIMITS } from '../shared/rules.js';
 import type { TaskStore } from '../storage/tasks.js';
@@ -21,6 +21,7 @@ export class TaskEngine {
   private timer?: ReturnType<typeof setInterval>;
   private running = new Map<string, Promise<void>>();
   private delivering = new Map<string, Promise<void>>();
+  private runningByProject = new Map<string, number>();
   private requests = new Set<Promise<unknown>>();
   private admissions = new Set<Promise<unknown>>();
   private uploads = new Map<string, number>();
@@ -43,7 +44,7 @@ export class TaskEngine {
     if (conversation && project.workspace_path !== conversation.workspace_path) throw changed();
     const beforeRelocate = () => {
       if (conversation) throw changed();
-      if (this.uploads.get(id) || this.store.list().some(([, task]) => task.request.metadata.project_id === id && !this.store.deleted(task) && executing(task))) {
+      if (this.uploads.get(id) || this.store.pending().some(([, task]) => task.request.metadata.project_id === id && !this.store.deleted(task) && executing(task))) {
         throw new ApiError(409, 'PROJECT_BUSY', '项目仍有未结束任务或文件上传，暂时无法切换工作区目录', metadata);
       }
     };
@@ -97,9 +98,8 @@ export class TaskEngine {
       const project = await this.prepareProject(metadata.project_id, this.stop.signal, metadata);
       const files = await this.ports.files.resolve(metadata.project_id, project, request.files);
       this.assertReady();
-      // An empty binding after a failed task write does not reserve the conversation.
-      const conversation = await this.store.conversations.ensure(metadata, project);
-      await this.store.put(key, queued(request, project, files, this.now(), conversation));
+      // Persist the task and its conversation mapping in one transaction.
+      await this.store.enqueue(key, request, project, files, this.now());
       return { status: 202, body: { metadata, status: 'queued' },
         location: `/projects/${encodeURIComponent(metadata.project_id)}/conversations/${encodeURIComponent(metadata.conversation_id)}/chats/${encodeURIComponent(metadata.chat_id)}` };
     }), true);
@@ -122,9 +122,9 @@ export class TaskEngine {
     return this.store.conversations.get(metadata)?.deleted ?? false;
   }
   async recover(): Promise<void> {
-    for (const [, task] of this.store.list()) if (this.store.active(task)) await this.conversationDeleted(task.request.metadata);
+    for (const [, task] of this.store.pending()) if (this.store.active(task)) await this.conversationDeleted(task.request.metadata);
     this.store.assertProjects(this.projects);
-    for (const [key, task] of this.store.list()) {
+    for (const [key, task] of this.store.pending()) {
       if (this.store.deleted(task)) continue;
       if (task.status === 'running') await this.store.update(key, value => executionFailed(value, task.execution.attempt_id!, 'EXECUTION_INTERRUPTED', this.now()));
       if (task.status === 'completed' && task.delivery.in_flight) await this.store.update(key, value => deliveryFinished(value, 'CALLBACK_INTERRUPTED', this.now()));
@@ -138,7 +138,7 @@ export class TaskEngine {
     this.ready = false;
     try {
       const projects = typeof source === 'function' ? await source() : source;
-      this.store.assertProjects(projects);
+      this.store.assertProjects(projects, true);
       await activate(projects);
       this.projects.clear();
       for (const [id, project] of projects) this.projects.set(id, project);
@@ -149,36 +149,46 @@ export class TaskEngine {
     this.timer = setInterval(() => this.tick(), 200);
     this.timer.unref(); this.tick();
   }
-  private launch(pool: Map<string, Promise<void>>, id: string, operation: () => Promise<void>): void {
+  private failScheduling(): void {
+    if (this.broken) return;
+    this.broken = true;
+    this.ports.log?.('terms-bridge scheduler/storage error; scheduling paused until reload');
+  }
+  private launch(pool: Map<string, Promise<void>>, id: string, operation: () => Promise<void>, finished?: () => void): void {
     // Reserve synchronously, before asynchronous state checks or storage writes can yield.
-    const work = Promise.resolve().then(operation).catch(() => {
-      this.broken = true;
-      this.ports.log?.('terms-bridge scheduler/storage error; scheduling paused until reload');
-    }).finally(() => pool.delete(id));
+    const work = Promise.resolve().then(operation).catch(() => this.failScheduling())
+      .finally(() => { pool.delete(id); finished?.(); });
     pool.set(id, work);
   }
   tick(): void {
     if (!this.available) return;
-    const groups = new Map<string, [string, TaskRecord][]>();
-    for (const entry of this.store.list()) {
-      const id = entry[1].request.metadata.project_id;
-      if (!groups.has(id)) groups.set(id, []);
-      groups.get(id)!.push(entry);
-    }
-    for (const [id, project] of this.projects) {
-      const tasks = groups.get(id) ?? [];
-      let capacity = project.max_concurrency === 0 ? Infinity : project.max_concurrency - tasks.filter(([key]) => this.running.has(key)).length;
-      const ready = tasks.filter(([key, task]) => !this.running.has(key) && !this.store.deleted(task) && ['queued', 'retrying'].includes(task.status) && Date.parse(readyAt(task)) <= this.now() && !this.ports.sessionBusy?.(task.execution.session_id));
-      ready.sort((a, b) => readyAt(a[1]).localeCompare(readyAt(b[1])));
-      for (const [key] of ready) {
-        if (capacity-- <= 0) break;
-        this.launch(this.running, key, () => this.execute(key));
+    try {
+      const groups = new Map<string, [string, TaskRecord][]>();
+      for (const entry of this.store.pending()) {
+        const id = entry[1].request.metadata.project_id;
+        if (!groups.has(id)) groups.set(id, []);
+        groups.get(id)!.push(entry);
       }
-      if (this.delivering.has(id)) continue;
-      const callbacks = tasks.filter(([, task]) => !this.store.deleted(task) && task.status === 'completed' && ['pending', 'retrying'].includes(task.delivery.status) && !task.delivery.in_flight && (!task.delivery.next_retry_at || Date.parse(task.delivery.next_retry_at) <= this.now()));
-      callbacks.sort((a, b) => (a[1].delivery.next_retry_at ?? a[1].completed_at!).localeCompare(b[1].delivery.next_retry_at ?? b[1].completed_at!));
-      if (callbacks[0]) this.launch(this.delivering, id, () => this.deliver(callbacks[0]![0]));
-    }
+      for (const [id, project] of this.projects) {
+        const tasks = groups.get(id) ?? [];
+        let capacity = project.max_concurrency === 0 ? Infinity : project.max_concurrency - (this.runningByProject.get(id) ?? 0);
+        const ready = tasks.filter(([key, task]) => !this.running.has(key) && !this.store.deleted(task) && ['queued', 'retrying'].includes(task.status) && Date.parse(readyAt(task)) <= this.now() && !this.ports.sessionBusy?.(task.execution.session_id));
+        ready.sort((a, b) => readyAt(a[1]).localeCompare(readyAt(b[1])));
+        for (const [key] of ready) {
+          if (capacity-- <= 0) break;
+          // A deleted session leaves the query immediately, but its execution may still be draining.
+          this.runningByProject.set(id, (this.runningByProject.get(id) ?? 0) + 1);
+          this.launch(this.running, key, () => this.execute(key), () => {
+            const count = this.runningByProject.get(id)! - 1;
+            if (count) this.runningByProject.set(id, count); else this.runningByProject.delete(id);
+          });
+        }
+        if (this.delivering.has(id)) continue;
+        const callbacks = tasks.filter(([, task]) => !this.store.deleted(task) && task.status === 'completed' && ['pending', 'retrying'].includes(task.delivery.status) && !task.delivery.in_flight && (!task.delivery.next_retry_at || Date.parse(task.delivery.next_retry_at) <= this.now()));
+        callbacks.sort((a, b) => (a[1].delivery.next_retry_at ?? a[1].completed_at!).localeCompare(b[1].delivery.next_retry_at ?? b[1].completed_at!));
+        if (callbacks[0]) this.launch(this.delivering, id, () => this.deliver(callbacks[0]![0]));
+      }
+    } catch { this.failScheduling(); }
   }
   private async execute(key: string): Promise<void> {
     if (await this.conversationDeleted(this.store.get(key)!.request.metadata)) return;

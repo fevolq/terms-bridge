@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import type { ConversationRecord, Project, Table, TaskRecord, WorkspaceBinding } from '../domain/types.js';
+import type { Project } from '../domain/types.js';
 
 /** Only the public dsh surface used by the adapters; no bundled host implementation. */
 export interface Workspace { id: string; path: string; title?: string; attachSession(id: string): Promise<void> }
@@ -26,11 +26,8 @@ export interface AgentScope {
   on(event: 'agent/pre-step', handler: (payload: { agent: Agent; turn: number }, next: () => Promise<unknown>) => Promise<unknown>, options?: { prepend: boolean }): () => void;
 }
 export interface Host {
-  readonly fiber?: { state: number; await(): Promise<unknown> };
-  inject?(services: string[], apply: (scope: { configEditor: {
-    entries(): { fiber?: unknown }[];
-    edit(entry: { fiber?: unknown }, change: (current: Record<string, unknown>) => Record<string, unknown>): Promise<void>;
-  } }) => void): unknown;
+  profileContext: { dir: string };
+  settings: { readonly writable: boolean };
   readonly baseUrl?: string;
   workspaceController: object;
   pluginPackages: { packageOf(specifier: string, parentURL: string): { dir: string } | undefined };
@@ -48,14 +45,9 @@ export interface Host {
     saveImage(input: { data: Uint8Array; mediaType: string; name: string }): Promise<AttachmentRef>;
     fileHostPath(ref: AttachmentRef): string | undefined; imageHostPath(ref: AttachmentRef): string | undefined;
   };
-  storageDomain: { open(spec: object): Promise<{
-    table(name: 'tasks'): Table<TaskRecord>; table(name: 'conversations'): Table<ConversationRecord>;
-    table(name: 'projects'): Table<Record<string, WorkspaceBinding>>; close(): Promise<void>;
-  }> };
   webServer: { register(route: { kind: 'prefix'; path: string; handler(req: IncomingMessage, res: ServerResponse): Promise<void> }): () => void };
   typert: { register(contribution: object): () => void };
   provide(name: string, service: object): () => void;
   effect(callback: () => (() => void | Promise<void>)): unknown;
-  on?(event: string, callback: (this: unknown, ...args: unknown[]) => unknown): () => void;
   logger?(name: string): { info(message: string): void; error(message: string): void };
 }

@@ -3,7 +3,7 @@ import { copyFile, readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { UnsettledExecutionError, type Run, type TaskRecord, type UploadedFile } from '../domain/types.js';
 import { LIMITS } from '../shared/rules.js';
-import { FileLibrary } from '../storage/files.js';
+import type { FileLibrary } from '../storage/files.js';
 import { generatedName, pathIdentity } from '../storage/paths.js';
 import { prepareOutputDirectory, prepareTaskFiles } from '../storage/task-files.js';
 import type { ContentBlock, Host } from './host.js';
@@ -47,7 +47,7 @@ async function collect(host: Host, library: FileLibrary, task: TaskRecord, block
   }
   return files;
 }
-export function makeRunner(host: Host, library = new FileLibrary()): Run {
+export function makeRunner(host: Host, library: FileLibrary): Run {
   return async (task, signal, session) => {
     let turn: ReturnType<typeof sendTask> | undefined;
     try {

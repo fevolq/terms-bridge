@@ -1,13 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, writeFile, mkdir, symlink, rm } from 'node:fs/promises';
+import { mkdtemp, writeFile, mkdir, symlink, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { replaceFiles, makeRunner } from '../dist/dsh/runner.js';
 import { UnsettledExecutionError } from '../dist/domain/types.js';
 import { finalResponse, presentedFiles, referencedPaths } from '../dist/dsh/results.js';
-import { fixture, request, deferred, until, fileTestAgent, fileTestSessions } from './helpers.mjs';
+import { temporaryDatabase, fixture, request, deferred, until, fileTestAgent, fileTestSessions } from './helpers.mjs';
 import { recordSchema } from '../dist/storage/tasks.js';
 import { FileLibrary } from '../dist/storage/files.js';
 
@@ -91,8 +91,8 @@ test('file-card-only replies reach callbacks and downloads without collecting in
     ...fileTestSessions(options => fileTestAgent({ id: options.sessionId, followup(message) { events.splice(1, 0, { type: 'user/message', data: message }); }, cancel() {}, whenIdle: async () => {},
       session: { snapshotEvents: () => events } })),
   };
-  const library = new FileLibrary(); let callback;
-  const f = await fixture({ run: makeRunner(host, library), files: library, overrides: { workspace_path: workspace },
+  const database = temporaryDatabase(), library = new FileLibrary(database); let callback;
+  const f = await fixture({ database, run: makeRunner(host, library), files: library, overrides: { workspace_path: workspace },
     callback: async task => { callback = JSON.parse(task.callback_body); return null; } });
   t.after(() => f.engine.close());
   await f.engine.accept(request()); await f.cycle(); await f.cycle();
@@ -129,7 +129,7 @@ test('runner returns untouched final text and deduplicates files; no injected bu
         assistant([{ type: 'reasoning', text: '内部' }, { type: 'text', text: result }, attachment, attachment]), end('completed')] },
     })),
   };
-  const library = new FileLibrary();
+  const library = f.files;
   const run = makeRunner(host, library);
   const actual = await run(record, new AbortController().signal, { created: false, ready: async () => {} });
   assert.equal(actual.result, result); assert.match(actual.files[0].filename, /^\d{10}_[a-zA-Z0-9]{6}\.txt$/); assert.match(actual.files[1].filename, /^\d{10}_[a-zA-Z0-9]{6}\.png$/);
@@ -184,8 +184,8 @@ test('concurrent tasks retain published result bytes after a later overwrite', a
       return file;
     }
   }
-  const library = new Library();
-  const f = await fixture({ run: await makeRunner(host, library), files: library, overrides: { workspace_path: workspace, max_concurrency: 2 } });
+  const database = temporaryDatabase(), library = new Library(database);
+  const f = await fixture({ database, run: makeRunner(host, library), files: library, overrides: { workspace_path: workspace, max_concurrency: 2 } });
   t.after(() => f.engine.close());
   for (const task of ['A', 'B']) await f.engine.accept({ ...request(task), instruction: task });
   await f.cycle(); await f.cycle(); await f.cycle();

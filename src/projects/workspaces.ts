@@ -70,10 +70,9 @@ export async function resolveProjects(host: Pick<Host, 'workspaceRegistry'>, con
   }
   return projects;
 }
-export async function saveProjectWorkspaces(table: Table<Record<string, WorkspaceBinding>>, projects: ReadonlyMap<string, ProjectState | WorkspaceBinding>): Promise<void> {
-  const bindings = Object.fromEntries([...projects].filter(([, value]) => value.workspace_path).map(([id, { workspace_path, configured_path }]) =>
+export function workspaceBindings(projects: ReadonlyMap<string, ProjectState | WorkspaceBinding>): Record<string, WorkspaceBinding> {
+  return Object.fromEntries([...projects].filter(([, value]) => value.workspace_path).map(([id, { workspace_path, configured_path }]) =>
     [id, { workspace_path: workspace_path!, ...(configured_path ? { configured_path } : {}) }]));
-  if (JSON.stringify(table.get('current')) !== JSON.stringify(bindings)) await table.put('current', bindings);
 }
 
 /** Owns path selection, DSH registration and binding persistence, not task policy. */
@@ -88,7 +87,6 @@ export class ProjectWorkspaces {
     }
   }
   configure(config: PluginConfig): Promise<Map<string, ProjectState>> { return resolveProjects(this.host, config, this.projects, this.directory); }
-  save(projects: ReadonlyMap<string, ProjectState>): Promise<void> { return saveProjectWorkspaces(this.bindings, projects); }
   /** Called under the project's admission lock, only for uploads and submissions. */
   async prepare(id: string, signal: AbortSignal, beforeRelocate: () => void): Promise<ResolvedProject> {
     signal.throwIfAborted();

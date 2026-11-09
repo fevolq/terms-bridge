@@ -1,3 +1,4 @@
+import { FileLibrary } from '../dist/storage/files.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
@@ -5,7 +6,7 @@ import { pathToFileURL } from 'node:url';
 import { mkdtemp, mkdir, rm } from 'node:fs/promises';
 import { join, relative, isAbsolute } from 'node:path';
 import { tmpdir } from 'node:os';
-import { fixture, request } from './helpers.mjs';
+import { temporaryDatabase, fixture, request } from './helpers.mjs';
 import { makeRunner } from '../dist/dsh/runner.js';
 import { recordSchema } from '../dist/storage/tasks.js';
 import { mountNativePresets } from './native-presets.mjs';
@@ -62,7 +63,8 @@ test('native initialization and model failures retry in the same conversation wi
         await workspace.attachSession(id);
       },
     }] } };
-    const f = await fixture({ run: await makeRunner(host), sessionExists: async id => (await ctx.sessionPersistence.stat(id)) !== undefined,
+    const database = temporaryDatabase(), files = new FileLibrary(database);
+    const f = await fixture({ database, files, run: makeRunner(host, files), sessionExists: async id => (await ctx.sessionPersistence.stat(id)) !== undefined,
       overrides: { workspace_path: workspace.path } });
     try {
       await f.engine.accept(request()); await f.cycle();
@@ -86,7 +88,8 @@ test('native initialization and model failures retry in the same conversation wi
     } finally { await f.engine.close(); }
   }
   assert.equal(modelCalls, 1);
-  const continued = await fixture({ run: makeRunner(ctx), sessionExists: async id => (await ctx.sessionPersistence.stat(id)) !== undefined,
+  const database = temporaryDatabase(), files = new FileLibrary(database);
+  const continued = await fixture({ database, files, run: makeRunner(ctx, files), sessionExists: async id => (await ctx.sessionPersistence.stat(id)) !== undefined,
     overrides: { workspace_path: workspace.path, max_execution_retries: 1 } });
   try {
     await continued.engine.accept({ ...request('multi'), instruction: 'Remember the codeword: apricot.' });

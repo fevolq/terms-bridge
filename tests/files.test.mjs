@@ -9,7 +9,7 @@ import { join } from 'node:path';
 import { fixture, project, request, successRun, until, listenHttp } from './helpers.mjs';
 import { handler } from '../dist/http/api.js';
 import { FileLibrary } from '../dist/storage/files.js';
-import { prepareOutputDirectory, prepareTaskFiles } from '../dist/storage/task-files.js';
+import { prepareTaskFiles } from '../dist/storage/task-files.js';
 import { recordSchema } from '../dist/storage/tasks.js';
 
 async function setup(t, options = {}) {
@@ -31,7 +31,7 @@ async function setup(t, options = {}) {
 test('project-only upload is reusable by multiple chats; retries get isolated original bytes and survive reload', async t => {
   const observed = [];
   const f = await setup(t, { run: async (record, signal) => {
-    const [file] = await prepareTaskFiles(record, signal);
+    const [file] = await prepareTaskFiles(record, signal, f.files);
     observed.push({ path: file.path, session: record.execution.session_id, text: await readFile(file.path, 'utf8') });
     await writeFile(file.path, 'edited by task');
     if (record.execution.attempts === 1) throw new Error('retry');
@@ -44,7 +44,7 @@ test('project-only upload is reusable by multiple chats; retries get isolated or
   assert.equal((await f.submit(body)).status, 202);
   assert.equal((await f.submit(body)).status, 409);
   assert.equal((await f.submit({ ...body, files: [] })).status, 409);
-  const restored = new FileLibrary(); assert.deepEqual(await restored.resolve('news', f.projects.get('news'), body.files), [file]);
+  const restored = new FileLibrary(f.database); assert.deepEqual(await restored.resolve('news', f.projects.get('news'), body.files), [file]);
   await f.cycle(); f.advance(60000); await f.cycle(); await f.cycle();
   assert.equal(f.record('CON:task').status, 'completed'); recordSchema.parse(f.record('CON:task'));
   assert.equal((await f.submit({ ...body, metadata: { ...body.metadata, chat_id: 'reuse' } })).status, 202);
@@ -64,11 +64,12 @@ test('uploads use unique generated filenames on disk and in attempt copies', asy
     assert.equal(file.filename.slice(17), extension); assert.equal(seen.has(file.filename), false); seen.add(file.filename);
     assert.ok(Math.abs(Number(file.filename.slice(0, 10)) - Math.floor(Date.now() / 1000)) < 5);
     const folder = join(f.workspace, '.terms-bridge', 'files', file.file_id);
-    assert.deepEqual((await readdir(folder)).sort(), [file.filename, 'metadata.json'].sort());
+    assert.deepEqual(await readdir(folder), [file.filename]);
+    assert.deepEqual(f.database.files.get(file.file_id).file, file);
     assert.equal(await readFile(join(folder, file.filename), 'utf8'), 'original bytes');
     const task = request(file.file_id); task.files = [{ file_id: file.file_id }]; await f.engine.accept(task);
     const record = f.record(file.file_id); record.execution.attempt_id = 'attempt';
-    const [copy] = await prepareTaskFiles(record, new AbortController().signal);
+    const [copy] = await prepareTaskFiles(record, new AbortController().signal, f.files);
     assert.equal(copy.filename, file.filename); assert.ok(copy.path.endsWith(file.filename));
     assert.equal(await readFile(copy.path, 'utf8'), 'original bytes');
   }
@@ -114,11 +115,14 @@ test('multipart validation, exact size boundary, streaming overflow and partial-
 });
 
 test('upload timeout/disconnect releases slots and removes incomplete files', async t => {
-  const f = await setup(t, { transferOptions: { timeoutMs: 80 } });
+  const transferOptions = { timeoutMs: 80 };
+  const f = await setup(t, { transferOptions });
   const url = f.base + '/projects/news/files';
   const slow = httpRequest(url, { method: 'POST', headers: { 'Content-Type': 'multipart/form-data; boundary=x' } });
   slow.write('--x\r\nContent-Disposition: form-data; name="file"; filename="x.txt"\r\n\r\nhello');
   const [res] = await once(slow, 'response'); res.resume(); assert.equal(res.statusCode, 408); slow.destroy();
+  // Only the stalled request uses a short deadline; later steps verify disconnect cleanup and recovery.
+  delete transferOptions.timeoutMs;
   const aborted = httpRequest(url, { method: 'POST', headers: { 'Content-Type': 'multipart/form-data; boundary=x' } });
   aborted.on('error', () => {}); aborted.write('--x\r\nContent-Disposition: form-data; name="file"; filename="x.txt"\r\n\r\nhello');
   await until(async () => (await readdir(join(f.workspace, '.terms-bridge', 'files'))).some(x => x.startsWith('.incoming')));
@@ -133,7 +137,7 @@ test('changed file bytes are detected before executing attachments', async t => 
   await f.engine.accept({ ...request(), files: [{ file_id: file.file_id }] });
   await writeFile(join(f.workspace, '.terms-bridge', 'files', file.file_id, file.filename), 'other');
   const record = f.record(); record.execution.attempt_id = 'test-attempt';
-  await assert.rejects(prepareTaskFiles(record, new AbortController().signal), /checksum/);
+  await assert.rejects(prepareTaskFiles(record, new AbortController().signal, f.files), /checksum/);
 });
 
 test('concurrent uploads are bounded and shutdown drains uploads awaited by configuration changes', async t => {
@@ -192,7 +196,7 @@ test('publish result -> callback reference -> authenticated streaming download; 
   assert.equal((await fetch(url.replace('/news/', '/other/'))).status, 404);
   assert.equal((await fetch(`${f.base}/projects/news/files/file_${'a'.repeat(32)}`, { headers })).status, 404);
   assert.equal((await fetch(`${f.base}/projects/news/files/%2e%2e%2fsecret`, { headers })).status, 400);
-  const reopened = await new FileLibrary().openDownload('news', f.projects.get('news'), published.file.file_id, new AbortController().signal);
+  const reopened = await new FileLibrary(f.database).openDownload('news', f.projects.get('news'), published.file.file_id, new AbortController().signal);
   assert.equal(reopened.file.sha256, published.file.sha256); await reopened.handle.close();
   await writeFile(join(f.workspace, '.terms-bridge', 'files', published.file.file_id, published.file.filename), Buffer.alloc(6));
   const corrupt = await fetch(url, { headers }); assert.equal(corrupt.status, 422); assert.equal((await corrupt.json()).error.code, 'FILE_UNAVAILABLE');
@@ -201,7 +205,7 @@ test('publish result -> callback reference -> authenticated streaming download; 
 test('result snapshots reject outside paths, hardlinks and directory links', async t => {
   const f = await setup(t);
   const outside = join(f.root, 'secret.txt'); await writeFile(outside, 'private');
-  await f.engine.accept(request()); const record = f.record(); const library = new FileLibrary();
+  await f.engine.accept(request()); const record = f.record(); const library = new FileLibrary(f.database);
   const signal = new AbortController().signal;
   for (const path of [outside, '../secret.txt']) await assert.rejects(library.publish(record, path, signal), e => e.code === 'INVALID_FILE_PATH');
   await link(outside, join(f.workspace, 'hardlink.txt'));

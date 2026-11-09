@@ -11,7 +11,7 @@ await rm(dist, { recursive: true, force: true });
 const build = spawnSync(process.execPath, [resolve(root, 'node_modules/typescript/bin/tsc'), '-p', resolve(root, 'tsconfig.json')], { stdio: 'inherit' });
 if (build.status !== 0) process.exit(build.status ?? 1);
 const manifest = JSON.parse(await readFile(resolve(root, 'package.json'), 'utf8'));
-const sources = ['dist/shared/rules.js', 'dist/shared/workspaces.js', 'client/fields.mjs', 'client/model.mjs', 'client/catalog.mjs', 'client/transport.mjs', 'client/panel.mjs'];
+const sources = ['dist/shared/rules.js', 'dist/shared/settings.js', 'dist/shared/workspaces.js', 'client/fields.mjs', 'client/model.mjs', 'client/catalog.mjs', 'client/transport.mjs', 'client/panel.mjs'];
 const modules = [];
 for (const file of sources) {
   const source = await readFile(resolve(root, file), 'utf8');
@@ -35,7 +35,7 @@ window.__ModuleLoader__.load({ id: ${JSON.stringify(manifest.name)}, factory(hos
     });
     return module.exports;
   }
-  return { inject: ['slots', 'configForms', 'remote', 'remote.session', 'remote.settings', 'remote.agentPresets'],
+  return { inject: ['slots', 'remote', 'remote.session', 'remote.agentPresets'],
     apply(ctx) { return load('client/panel.mjs').mountPanel(hostRequire('react'), ctx, ${JSON.stringify(css)}); }
   };
 } });

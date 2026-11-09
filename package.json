@@ -1,6 +1,6 @@
 {
   "name": "@fevolq/terms-bridge",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Project task execution and result delivery for DeepSeek Harness.",
   "license": "MIT",
   "repository": {
@@ -22,7 +22,7 @@
   },
   "type": "module",
   "engines": {
-    "node": ">=22"
+    "node": ">=22.13.0"
   },
   "exports": {
     ".": "./dist/index.js",
@@ -53,12 +53,10 @@
     "prepack": "npm run build"
   },
   "dependencies": {
-    "@deepseek-ai/schemastery": "^3.18.5",
     "busboy": "^1.6.0",
     "zod": "^4.4.3"
   },
   "bundledDependencies": [
-    "@deepseek-ai/schemastery",
     "busboy",
     "zod"
   ],

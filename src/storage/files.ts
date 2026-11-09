@@ -1,16 +1,18 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { open, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { open, rename, rm } from 'node:fs/promises';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { ApiError } from '../domain/request.js';
 import { uploadedFileSchema } from '../domain/file.js';
 import { FILE_ID, LIMITS } from '../shared/rules.js';
 import type { ResolvedProject, TaskRecord, UploadedFile } from '../domain/types.js';
+import type { BridgeDatabase } from './database.js';
+import { pathIdentity } from './paths.js';
 import { copyBytes, directory, FILE_ROOT, generatedName, inside, regularFile } from './paths.js';
 
 /** A draft is visible by ID only after commit; callers always dispose it in finally. */
 export class FileDraft {
   private written = false;
-  constructor(readonly file: UploadedFile, private path: string) {}
+  constructor(readonly file: UploadedFile, private path: string, private database: BridgeDatabase, private workspace: string) {}
   async write(source: AsyncIterable<Uint8Array>, signal: AbortSignal, limit = LIMITS.file): Promise<void> {
     Object.assign(this.file, await copyBytes(source, join(this.path, this.file.filename), signal, limit));
     this.written = true;
@@ -18,19 +20,22 @@ export class FileDraft {
   async commit(signal: AbortSignal): Promise<UploadedFile> {
     if (!this.written) throw new Error('File draft has no completed content');
     uploadedFileSchema.parse(this.file);
-    await writeFile(join(this.path, 'metadata.json'), JSON.stringify(this.file), { flag: 'wx', mode: 0o600, flush: true });
     signal.throwIfAborted();
-    await rename(this.path, join(dirname(this.path), this.file.file_id));
+    const target = join(dirname(this.path), this.file.file_id);
+    await rename(this.path, target);
+    try { signal.throwIfAborted(); await this.database.saveFile(this.file, this.workspace); }
+    catch (error) { await rm(target, { recursive: true, force: true }); throw error; }
     return this.file;
   }
   async dispose(): Promise<void> { await rm(this.path, { recursive: true, force: true }); }
 }
 export class FileLibrary {
+  constructor(private database: BridgeDatabase) {}
   async stage(projectId: string, project: ResolvedProject, filename: string, mediaType: string): Promise<FileDraft> {
     const file: UploadedFile = { file_id: 'file_' + randomUUID().replaceAll('-', ''), project_id: projectId,
       filename: generatedName(filename), media_type: mediaType.slice(0, 200), size: 0, sha256: '', created_at: new Date().toISOString() };
     const path = await directory(project.workspace_path, [FILE_ROOT, 'files', '.incoming-' + file.file_id], true);
-    return new FileDraft(file, path);
+    return new FileDraft(file, path, this.database, project.workspace_path);
   }
   async resolve(projectId: string, project: ResolvedProject, refs: { file_id: string }[]): Promise<UploadedFile[]> {
     const result: UploadedFile[] = [];
@@ -38,9 +43,9 @@ export class FileLibrary {
       if (!FILE_ID.test(file_id)) throw new ApiError(400, 'INVALID_REQUEST', 'Invalid file_id');
       try {
         const folder = await directory(project.workspace_path, [FILE_ROOT, 'files', file_id]);
-        const metadata = join(folder, 'metadata.json');
-        if ((await regularFile(metadata)).size > 4096) throw new Error('Invalid metadata size');
-        const file = uploadedFileSchema.parse(JSON.parse(await readFile(metadata, 'utf8')));
+        const record = this.database.files.get(file_id);
+        if (!record || pathIdentity(record.workspace_path) !== pathIdentity(project.workspace_path)) throw new ApiError(404, 'FILE_NOT_FOUND', 'File not found in this workspace');
+        const file = record.file;
         if (file.project_id !== projectId || file.file_id !== file_id) throw new ApiError(404, 'FILE_NOT_FOUND', 'File not found in this project');
         if ((await regularFile(join(folder, file.filename))).size !== file.size) throw new ApiError(422, 'FILE_UNAVAILABLE', 'File size changed');
         result.push(file);

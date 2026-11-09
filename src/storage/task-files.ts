@@ -2,7 +2,7 @@ import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { taskKey } from '../domain/request.js';
 import type { TaskRecord, UploadedFile } from '../domain/types.js';
-import { FileLibrary } from './files.js';
+import type { FileLibrary } from './files.js';
 import { copyBytes, directory, FILE_ROOT } from './paths.js';
 
 function attemptPath(task: TaskRecord): string[] {
@@ -13,7 +13,7 @@ export function prepareOutputDirectory(task: TaskRecord): Promise<string> {
   return directory(task.project.workspace_path, [...attemptPath(task), 'outputs'], true);
 }
 /** Each execution owns fresh input copies; source IDs remain reusable after edits or retries. */
-export async function prepareTaskFiles(task: TaskRecord, signal: AbortSignal, library = new FileLibrary()) {
+export async function prepareTaskFiles(task: TaskRecord, signal: AbortSignal, library: FileLibrary) {
   const result: (UploadedFile & { path: string })[] = [];
   for (const file of task.files) {
     const folder = await directory(task.project.workspace_path, [...attemptPath(task), 'inputs', file.file_id], true);

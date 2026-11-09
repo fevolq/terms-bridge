@@ -56,11 +56,9 @@ test('automatic workspaces are idempotent siblings of the default workspace and 
 test('workspace names may repeat while resolved project paths must remain distinct', async t => {
   const root = await mkdtemp(join(tmpdir(), 'terms-duplicate-workspace-'));
   t.after(() => rm(root, { recursive: true, force: true }));
-  const home = join(root, 'default-workspace'), taken = join(root, 'taken'), fresh = join(root, 'fresh');
+  const taken = join(root, 'taken'), fresh = join(root, 'fresh');
   const sameDirectory = join(root, 'other', 'taken');
-  for (const path of [home, taken, fresh, sameDirectory]) await mkdir(path, { recursive: true });
-  const registered = [{ id: 'default', path: home, title: 'default-workspace' }, { id: 'taken', path: taken, title: '已存在的工作区' }];
-  const host = { workspaceRegistry: { list: () => registered, create: () => assert.fail('Validation must not register workspaces') } };
+  for (const path of [taken, fresh, sameDirectory]) await mkdir(path, { recursive: true });
   const config = p => parseConfig({ projects: { news: { ...project, ...p } } });
   const empty = new Map();
   const sameTitle = validateProjectWorkspaces(config({ name: '已存在的工作区', workspace_path: fresh }), empty, () => root);

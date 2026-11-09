@@ -2,17 +2,17 @@ import { z } from 'zod';
 import { projectSchema } from '../projects/config.js';
 import { uploadedFileSchema } from '../domain/file.js';
 import { requestSchema, taskKey } from '../domain/request.js';
-import { active, executing } from '../domain/task.js';
-import { LIMITS, PROJECT_ID } from '../shared/rules.js';
-import type { ConversationRecord, Table, TaskMetadata, TaskRecord } from '../domain/types.js';
-import { ConversationStore, conversationSchema } from './conversations.js';
+import { active, executing, queued } from '../domain/task.js';
+import { LIMITS } from '../shared/rules.js';
+import type { TaskMetadata, TaskRecord, TaskRequest, ResolvedProject, UploadedFile } from '../domain/types.js';
+import type { BridgeDatabase } from './database.js';
+import { ConversationStore } from './conversations.js';
 
 const optionalTime = z.string().datetime().nullable();
 const count = z.number().int().nonnegative();
 export const recordSchema = z.object({
   request: requestSchema,
-  project: projectSchema.extend({ name: z.string().min(1), workspace_path: z.string().min(1), workspace_id: z.string().optional() })
-    .transform(({ workspace_id, ...project }) => project),
+  project: projectSchema.extend({ name: z.string().min(1), workspace_path: z.string().min(1) }),
   files: z.array(uploadedFileSchema).max(LIMITS.files), output_files: z.array(uploadedFileSchema).max(LIMITS.files).optional(),
   status: z.enum(['queued', 'running', 'retrying', 'completed', 'failed']),
   execution: z.object({ attempts: count, attempt_id: z.string().nullable(), session_id: z.string().uuid(),
@@ -41,28 +41,28 @@ export const recordSchema = z.object({
   } else if (task.result !== undefined || task.callback_body !== null || task.completed_at !== null || delivery.status !== 'not_ready') errors.push('Result before completion');
   for (const message of errors) context.addIssue({ code: 'custom', message });
 });
-export const domainSpec = { name: 'fevolq_terms_bridge_v2', version: 1, layout: 'single' as const,
-  tables: { tasks: { valueSchema: recordSchema }, conversations: { valueSchema: conversationSchema },
-    projects: { valueSchema: z.record(z.string().regex(PROJECT_ID),
-      z.object({ workspace_id: z.string().optional(), workspace_path: z.string().min(1), configured_path: z.string().min(1).optional() })
-        .strict().transform(({ workspace_id, ...binding }) => binding)) } } };
 export class TaskStore {
   private admissions = new Map<string, Promise<unknown>>();
   readonly conversations: ConversationStore;
-  constructor(private table: Table<TaskRecord>, conversations: Table<ConversationRecord>) { this.conversations = new ConversationStore(conversations); }
-  get(key: string): TaskRecord | undefined { return this.table.get(key); }
-  list(): [string, TaskRecord][] { return [...this.table.entries()]; }
-  put(key: string, task: TaskRecord): Promise<void> { return this.table.put(key, task); }
+  constructor(private database: BridgeDatabase) { this.conversations = new ConversationStore(database.mappings); }
+  async enqueue(key: string, request: TaskRequest, project: ResolvedProject, files: UploadedFile[], now: number): Promise<void> {
+    const mapping = this.conversations.prepare(request.metadata, project);
+    this.database.admitTask(key, queued(request, project, files, now, mapping), mapping);
+  }
+  get(key: string): TaskRecord | undefined { return this.database.tasks.get(key); }
+  list(): [string, TaskRecord][] { return [...this.database.tasks.entries()]; }
+  pending(): [string, TaskRecord][] {
+    return [...this.database.tasks.pending()];
+  }
   deleted(task: TaskRecord): boolean { return this.conversations.get(task.request.metadata)?.deleted ?? false; }
   active(task: TaskRecord): boolean { return !this.deleted(task) && active(task); }
   update(key: string, change: (task: TaskRecord) => TaskRecord): Promise<TaskRecord> {
     // Recheck the shared marker when a queued write actually applies its transition.
-    return this.table.update(key, current => this.deleted(current) ? current : change(current));
+    return this.database.tasks.update(key, current => this.deleted(current) ? current : change(current));
   }
   busy(metadata: TaskMetadata): boolean {
     if (this.conversations.get(metadata)?.deleted) return false;
-    return this.list().some(([, task]) => task.request.metadata.project_id === metadata.project_id &&
-      task.request.metadata.conversation_id === metadata.conversation_id && executing(task));
+    return this.database.tasks.busy(metadata);
   }
   async locked<T>(key: string, operation: () => Promise<T>): Promise<T> {
     const work = (this.admissions.get(key) ?? Promise.resolve()).catch(() => {}).then(operation);
@@ -70,10 +70,10 @@ export class TaskStore {
     try { return await work; }
     finally { if (this.admissions.get(key) === work) this.admissions.delete(key); }
   }
-  assertProjects(projects: ReadonlyMap<string, { workspace_path?: string }>): void {
+  assertProjects(projects: ReadonlyMap<string, { workspace_path?: string }>, pendingOnly = false): void {
     this.conversations.validate();
     const busy = new Set<string>();
-    for (const [key, task] of this.list()) {
+    for (const [key, task] of pendingOnly ? this.pending() : this.list()) {
       const { project_id, conversation_id, chat_id } = task.request.metadata;
       if (key !== taskKey(project_id, conversation_id, chat_id)) throw new Error('Task record key mismatch');
       const conversation = this.conversations.get(task.request.metadata);

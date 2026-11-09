@@ -1,20 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createRequire } from 'node:module';
-import { pathToFileURL } from 'node:url';
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { createEditor } from '../client/model.mjs';
 import { DEFAULT_CONFIG, DEFAULT_PROJECT, validateDraft } from '../client/fields.mjs';
-import { Config, readConfig } from '../dist/dsh/settings.js';
 import { parseConfig } from '../dist/projects/config.js';
 import { createCatalog, catalogGroups, modelKey } from '../client/catalog.mjs';
 
 const project = { ...DEFAULT_PROJECT, max_concurrency: 1, agent_preset: 'standard', name: 'News', workspace_path: 'F:/business/news', provider: 'deepseek', model: 'deepseek-chat', callback_url: 'https://example.com/results', request_token: 'NEWS_TOKEN' };
 test('new installations expose only project and API settings with an empty project list', () => {
   assert.deepEqual(parseConfig({}).projects, {});
-  assert.deepEqual(Object.keys(Config.dict).sort(), ['api_prefix', 'projects']);
+  assert.deepEqual(Object.keys(parseConfig({})).sort(), ['api_prefix', 'projects']);
   assert.deepEqual(Object.keys(DEFAULT_CONFIG).sort(), ['api_prefix', 'projects']);
 });
 
@@ -48,7 +42,6 @@ test('blank and zero concurrency save as unlimited; positive limits survive reop
   const { max_concurrency, ...withoutLimit } = project;
   const omitted = { projects: { news: { ...withoutLimit, callback_headers: {} } } };
   assert.equal(parseConfig(omitted).projects.news.max_concurrency, 0);
-  assert.equal(readConfig(Config(omitted)).projects.news.max_concurrency, 0);
   const { form } = formFixture(); const editor = createEditor(form);
   const empty = editor.add();
   assert.equal(editor.getSnapshot().draft.rows[0].max_concurrency, '');
@@ -58,7 +51,6 @@ test('blank and zero concurrency save as unlimited; positive limits survive reop
     assert.equal(await editor.save(), true);
     assert.equal(form.getSnapshot().value.projects.news.max_concurrency, expected);
     assert.equal(parseConfig(form.getSnapshot().value).projects.news.max_concurrency, expected);
-    assert.equal(readConfig(Config(form.getSnapshot().value)).projects.news.max_concurrency, expected);
     const reopened = createEditor(form);
     assert.equal(reopened.getSnapshot().draft.rows[0].max_concurrency, expected); reopened.dispose();
   }
@@ -71,7 +63,6 @@ test('negative or fractional concurrency is rejected; other numeric settings sti
     assert.ok(validateDraft(draft(value)).errors['a.max_concurrency']);
     const config = { projects: { news: { ...project, callback_headers: {}, max_concurrency: value } } };
     assert.throws(() => parseConfig(config));
-    assert.throws(() => Config(config));
   }
   const invalid = draft(''); invalid.rows[0].execution_timeout_seconds = '';
   assert.ok(validateDraft(invalid).errors['a.execution_timeout_seconds']);
@@ -89,7 +80,6 @@ test('permission mode defaults to workspace-write and survives save and reload f
     assert.equal(await editor.save(), true);
     assert.equal(editor.getSnapshot().draft.rows[0].permission_mode, mode);
     assert.equal(parseConfig(form.getSnapshot().value).projects.news.permission_mode, mode);
-    assert.equal(readConfig(Config(form.getSnapshot().value)).projects.news.permission_mode, mode);
   }
   key = editor.getSnapshot().draft.rows[0].key;
   editor.project(key, 'permission_mode', 'invalid');
@@ -206,55 +196,6 @@ test('catalog preserves loaded choices on errors and exposes partial failures wi
   fail = true; await catalog.refresh(); assert.equal(catalog.getSnapshot().status, 'error'); assert.equal(catalog.getSnapshot().groups.length, 1);
   await catalog.refresh(true); assert.deepEqual(catalog.getSnapshot().groups, []); catalog.dispose();
 });
-test('native volatile references are detached into an immutable snapshot', () => {
-  const resolved = Config({ projects: { news: { ...project, name: 'News', callback_headers: undefined } } });
-  const snapshot = readConfig(resolved); parseConfig(snapshot);
-  snapshot.projects.news.model = 'other';
-  assert.equal(resolved.projects.get().news.model, 'deepseek-chat');
-  assert.equal(Config.dict.projects.meta.volatile, true);
-});
-
-test('real dsh settings exposes the plugin fields and native mutations keep captured snapshots unchanged', {
-  skip: !process.env.DSH_TEST_PACKAGE,
-}, async t => {
-  const requireHost = createRequire(process.env.DSH_TEST_PACKAGE);
-  const { Context, Service, resolveConfig } = await import(pathToFileURL(requireHost.resolve('@deepseek-ai/cordis')));
-  const { updateVolatile } = await import(pathToFileURL(requireHost.resolve('@deepseek-ai/cosmokit')));
-  const { default: Settings } = await import(pathToFileURL(requireHost.resolve('@deepseek-ai/dsh-settings')));
-  const ctx = new Context(); const fibers = []; t.after(async () => { for (const f of fibers.reverse()) await f.dispose(); });
-  let config; let atStartup;
-  const plugin = { Config, apply(_ctx, value) { config = value; atStartup = readConfig(value); } };
-  const f = ctx.plugin(plugin, {}); fibers.push(f); await f.await();
-  let raw = {};
-  const entry = { id: 'terms-bridge', options: { id: 'terms-bridge' }, fiber: f };
-  class TestEditor extends Service {
-    constructor(c) { super(c, 'configEditor'); }
-    documentPath = 'isolated-test-profile'; writable = true;
-    entries() { return [entry]; }
-    configuration() { return [{ entry, inherited: {}, override: raw }]; }
-    async edit(_entry, change) {
-      const next = change(raw, {}); const candidate = resolveConfig(f.runtime, next);
-      for (const field of ['projects', 'api_prefix']) updateVolatile(config[field], candidate[field]);
-      raw = next; entry.options.config = next;
-    }
-  }
-  const e = ctx.plugin(TestEditor); fibers.push(e); await e.await();
-  const isolatedHome = await mkdtemp(join(tmpdir(), 'dsh-settings-test-'));
-  class TestProfile extends Service { constructor(c) { super(c, 'profileContext'); } home = isolatedHome; }
-  class TestLoader extends Service { constructor(c) { super(c, 'loader'); } async await() {} }
-  for (const service of [TestProfile, TestLoader]) { const f = ctx.plugin(service); fibers.push(f); await f.await(); }
-  const s = ctx.plugin(Settings); fibers.push(s); await s.await();
-  const before = ctx.settings.describe().find(v => v.ns === 'terms-bridge');
-  assert.ok(before); assert.deepEqual(before.value.projects, {});
-  const clean = { ...project }; delete clean.name; delete clean.callback_headers;
-  await ctx.settings.mutate('terms-bridge', [{ op: 'set', path: ['projects'], value: { news: clean } }], before.revision);
-  const after = ctx.settings.describe().find(v => v.ns === 'terms-bridge');
-  assert.equal(after.value.projects.news.model, 'deepseek-chat');
-  assert.deepEqual(atStartup.projects, {});
-  await assert.rejects(ctx.settings.mutate('terms-bridge', [{ op: 'set', path: ['projects'], value: {} }], before.revision), /changed|revision|conflict/i);
-});
-
-
 test('projects sort newest first regardless of numeric IDs and keep undated projects stable', () => {
   const { form } = formFixture();
   const entry = created_at => ({ ...project, callback_headers: {}, ...(created_at ? { created_at } : {}) });
@@ -269,7 +210,7 @@ test('projects sort newest first regardless of numeric IDs and keep undated proj
   editor.dispose();
 });
 
-test('new project creation time survives native config, saving, editing and reopening', async () => {
+test('new project creation time survives saving, editing and reopening', async () => {
   const { form, writes } = formFixture();
   form.change({ value: { ...DEFAULT_CONFIG, projects: {
     '1': { ...project, callback_headers: {}, created_at: '2020-01-01T00:00:00.000Z' },
@@ -283,7 +224,7 @@ test('new project creation time survives native config, saving, editing and reop
   assert.ok(Date.parse(created.created_at) >= before && Date.parse(created.created_at) <= Date.now());
   assert.equal(await editor.save(), true);
   const saved = form.getSnapshot().value;
-  assert.equal(parseConfig(readConfig(Config(saved))).projects['2'].created_at, created.created_at);
+  assert.equal(parseConfig(saved).projects['2'].created_at, created.created_at);
   assert.deepEqual(editor.getSnapshot().draft.rows.map(row => row.id), ['2', '1']);
   const older = editor.getSnapshot().draft.rows.find(row => row.id === '1');
   editor.project(older.key, 'name', 'Renamed');

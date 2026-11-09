@@ -7,6 +7,12 @@ export async function mountNativeWorkspaces(ctx, load, requireHost, documentsDir
     const plugin = await load(name);
     await ctx.plugin(plugin.default ?? plugin, config).await();
   };
+  if (!ctx.get('profileContext')) ctx.provide('profileContext', { dir: documentsDirectory, home: documentsDirectory });
+  if (!ctx.get('settings')) ctx.provide('settings', {
+    writable: true,
+    // Native services register page policies as effects; these tests do not render native settings forms.
+    configure() { return () => {}; },
+  });
   if (!ctx.get('typert')) await mount('dsh-typert-registry');
   if (!ctx.get('remoteAccess')) await mount('dsh-api-remote-access');
   if (!ctx.get('pluginPackages')) {

@@ -16,13 +16,13 @@ export function createEditor(form) {
       callback_headers: Object.keys(project.callback_headers ?? {}).length ? JSON.stringify(project.callback_headers, null, 2) : '',
     })).sort((a, b) => (Date.parse(b.created_at) || 0) - (Date.parse(a.created_at) || 0));
     publish({ draft: { ...config, rows }, revision: snapshot.revision, status: snapshot.status, writable: snapshot.writable,
-      dirty: false, saved: false, conflict: false, errors: {}, message: '' });
+      connection: snapshot.connection, dirty: false, saved: false, conflict: false, errors: {}, message: '' });
   };
   const sync = () => {
     if (disposed) return;
     const snapshot = form.getSnapshot();
-    if (!state.draft || !state.dirty && !state.saving && snapshot.revision !== state.revision) reset();
-    else publish({ status: snapshot.status, writable: snapshot.writable, conflict: state.revision !== snapshot.revision });
+    if (!state.draft || !state.dirty && !state.saving && (snapshot.revision !== state.revision || snapshot.connection !== state.connection)) reset();
+    else publish({ status: snapshot.status, writable: snapshot.writable, conflict: state.revision !== snapshot.revision || state.connection !== snapshot.connection });
   };
   const unsubscribe = form.subscribe(sync);
   reset();

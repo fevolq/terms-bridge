@@ -1,10 +1,8 @@
 terms-bridge 是 DeepSeek Harness（dsh）的项目接入插件，用来连接业务项目与 dsh。业务项目提交提示词和文件，插件在对应工作区内创建或续接原生会话执行任务，并将 AI 的最终回复和结果文件引用回传给项目。
 
-使用协议 v3：`project_id` 定位项目，`conversation_id` 定位会话，`chat_id` 定位当次对话。任务请求可以省略后两个 ID，由插件生成并在响应中返回完整 metadata。
-
 ## 安装（推荐 npm）
 
-需要 Node.js 22+ 和兼容的 dsh；已验证 dsh `0.2.1-rc.2`。推荐从 [npm](https://www.npmjs.com/package/@fevolq/terms-bridge) 安装，以下使用 Web profile：
+需要 Node.js 22.13+ 和兼容的 dsh；已验证 dsh `0.2.1-rc.2`。推荐从 [npm](https://www.npmjs.com/package/@fevolq/terms-bridge) 安装，以下使用 Web profile：
 
 ```powershell
 dsh plugin --profile web add @fevolq/terms-bridge
@@ -29,6 +27,7 @@ dsh plugin --profile web update @fevolq/terms-bridge --latest
 | 多项目接入 | 每个项目拥有独立工作区及任务会话，支持单独配置模型、Agent 预设、权限和回调 |
 | 多轮对话 | 同项目、同会话 ID 续接同一原生会话，上下文由 dsh 管理；每次新对话使用新的 chat_id |
 | 原生设置集成 | 在 dsh 的「项目接入」页面管理项目，从已配置的模型和 Agent 预设中选择 |
+| SQLite 存储 | 插件配置、工作区绑定、session 映射和任务交付数据保存在当前 profile 的 SQLite 数据库中 |
 | 配置热更新 | 项目配置保存后生效，已有任务沿用接收时的配置；调整并发不会中断正在执行的任务 |
 | 文件传输 | 支持上传输入文件、在提示词中引用文件，以及下载最终结果文件 |
 | 任务调度 | 支持不限并发或按项目限制并发，多余任务按顺序排队 |
@@ -48,4 +47,4 @@ dsh plugin --profile web update @fevolq/terms-bridge --latest
 
 ## 与 dsh 的关系
 
-插件维护业务会话与原生会话的映射，通过 dsh 接口创建或恢复会话、查询 Agent 状态和发送消息。上下文、预设恢复及 Agent 生命周期由 dsh 管理；会话创建后固定使用原有预设。插件负责任务状态、结果文件和异步回调，配置及任务数据保存在各自的 dsh 中。
+插件维护业务会话与原生会话的映射，通过 dsh 接口创建或恢复会话、查询 Agent 状态和发送消息。上下文、预设恢复及 Agent 生命周期由 dsh 管理；会话创建后固定使用原有预设。插件负责任务状态、结果文件和异步回调，插件配置、工作区绑定、session 映射、任务交付记录及文件元数据保存在当前 dsh profile 的 `data/terms-bridge.sqlite` 中。会话消息和上下文仍由 dsh 原生存储管理，文件实体留在项目工作区。首次启动使用空配置，不迁移旧数据，也不扫描工作区已有文件；请在「项目接入」页面添加项目。

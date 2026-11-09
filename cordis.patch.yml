@@ -2,5 +2,3 @@
 - insert:
     - id: terms-bridge
       name: '@fevolq/terms-bridge'
-      config:
-        projects: {}

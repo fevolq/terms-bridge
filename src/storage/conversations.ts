@@ -6,9 +6,9 @@ import { CONVERSATION_ID, PROJECT_ID } from '../shared/rules.js';
 
 export const conversationSchema = z.object({
   project_id: z.string().regex(PROJECT_ID), conversation_id: z.string().regex(CONVERSATION_ID),
-  session_id: z.string().uuid(), workspace_id: z.string().optional(), workspace_path: z.string().min(1),
+  session_id: z.string().uuid(), workspace_path: z.string().min(1),
   created: z.boolean(), deleted: z.boolean(),
-}).strict().transform(({ workspace_id, ...record }) => record);
+}).strict();
 
 /** Durable identity only; dsh owns history. Admission holds the project lock. */
 export class ConversationStore {
@@ -16,7 +16,7 @@ export class ConversationStore {
   get(metadata: Pick<TaskMetadata, 'project_id' | 'conversation_id'>): ConversationRecord | undefined {
     return this.table.get(conversationKey(metadata.project_id, metadata.conversation_id));
   }
-  async ensure(metadata: TaskMetadata, project: ResolvedProject): Promise<ConversationRecord> {
+  prepare(metadata: TaskMetadata, project: ResolvedProject): ConversationRecord {
     const existing = this.get(metadata);
     if (existing) {
       // Removing a DSH registration changes its ID, not the conversation's directory.
@@ -27,7 +27,6 @@ export class ConversationStore {
     }
     const conversation: ConversationRecord = { project_id: metadata.project_id, conversation_id: metadata.conversation_id,
       session_id: randomUUID(), workspace_path: project.workspace_path, created: false, deleted: false };
-    await this.table.put(conversationKey(metadata.project_id, metadata.conversation_id), conversation);
     return conversation;
   }
   mark(metadata: TaskMetadata, field: 'created' | 'deleted'): Promise<ConversationRecord> {

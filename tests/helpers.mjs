@@ -1,3 +1,8 @@
+import { BridgeDatabase } from '../dist/storage/database.js';
+import { after } from 'node:test';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
 import { FileLibrary } from '../dist/storage/files.js';
 import { FileTransfer } from '../dist/http/files.js';
 import { TaskStore } from '../dist/storage/tasks.js';
@@ -15,6 +20,36 @@ export async function listenHttp(server) {
     if (!blocked.has(server.address().port)) return;
     await new Promise(resolve => server.close(resolve));
   }
+}
+
+const databases = [];
+after(() => {
+  for (const { database, directory } of databases) {
+    database.close();
+    if (dirname(directory) !== resolve(tmpdir()) || !directory.startsWith(join(resolve(tmpdir()), 'bridge-sqlite-test-'))) throw new Error('Invalid test database directory');
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+export function temporaryDatabase() {
+  const directory = mkdtempSync(join(resolve(tmpdir()), 'bridge-sqlite-test-'));
+  const database = new BridgeDatabase(join(directory, 'bridge.sqlite'));
+  databases.push({ database, directory });
+  return database;
+}
+function injectWriteFailure(table, database, name) {
+  if (Object.hasOwn(table, 'failWrites')) return;
+  let failed = false;
+  Object.defineProperty(table, 'failWrites', {
+    get: () => failed,
+    set(value) {
+      for (const event of ['INSERT', 'UPDATE']) {
+        const trigger = 'reject_' + name + '_' + event;
+        database.sql.exec('DROP TRIGGER IF EXISTS ' + trigger);
+        if (value) database.sql.exec('CREATE TRIGGER ' + trigger + ' BEFORE ' + event + ' ON ' + name + " BEGIN SELECT RAISE(ABORT, 'disk unavailable'); END");
+      }
+      failed = value;
+    },
+  });
 }
 
 export class MemoryTable {
@@ -43,13 +78,15 @@ export function project(overrides = {}) {
   } } }).projects.news;
   return p;
 }
-export async function fixture({ run = async () => {}, callback = async () => null, overrides = {}, table = new MemoryTable(), conversationTable = new MemoryTable(), files = new FileLibrary(), sessionExists, sessionBusy, transferOptions } = {}) {
+export async function fixture({ run = async () => {}, callback = async () => null, overrides = {}, database = temporaryDatabase(), files = new FileLibrary(database), sessionExists, sessionBusy, transferOptions } = {}) {
   let time = Date.parse('2026-10-30T00:00:00Z');
   const projects = new Map([['news', project(overrides)]]);
-  const store = new TaskStore(table, conversationTable);
+  const table = database.tasks, conversationTable = database.mappings;
+  injectWriteFailure(table, database, 'tasks'); injectWriteFailure(conversationTable, database, 'session_mappings');
+  const store = new TaskStore(database);
   const engine = new TaskEngine(store, projects, run, { callback, now: () => time, files, sessionExists, sessionBusy });
   await engine.recover();
-  return { engine, store, table, conversationTable, projects, files, transfer: new FileTransfer(files, transferOptions), advance: ms => { time += ms; },
+  return { engine, store, table, conversationTable, database, projects, files, transfer: new FileTransfer(files, transferOptions), advance: ms => { time += ms; },
     record: (id = 'task-1', chat = 'chat-1') => store.get(taskKey('news', id, chat)),
     cycle: async () => { engine.tick(); await engine.settle(); } };
 }

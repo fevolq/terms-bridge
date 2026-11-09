@@ -8,10 +8,8 @@ import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, relative } from 'node:path';
 import { createWorkspaceDirectory } from '../dist/dsh/directories.js';
 import { parseConfig } from '../dist/projects/config.js';
-import { watchProjectConfig } from '../dist/dsh/settings.js';
-import { TaskStore } from '../dist/storage/tasks.js';
 import { MemoryTable } from './helpers.mjs';
-import { ProjectWorkspaces, resolveProjects, validateProjectWorkspaces } from '../dist/projects/workspaces.js';
+import { workspaceBindings, ProjectWorkspaces, resolveProjects, validateProjectWorkspaces } from '../dist/projects/workspaces.js';
 
 const native = { skip: !process.env.DSH_TEST_PACKAGE };
 const project = { provider: 'test', model: 'model', callback_url: 'http://localhost/results' };
@@ -148,13 +146,10 @@ test('adding an automatic project awaits a cold native directory lookup and need
   const directory = createWorkspaceDirectory(f.ctx);
   const bindings = new MemoryTable(), service = new ProjectWorkspaces(f.ctx, bindings, directory);
   await service.load(parseConfig({}));
-  let guard; const fiber = {};
-  watchProjectConfig({ fiber, on: (_event, callback) => { guard = callback; return () => {}; } }, service.projects, new TaskStore(new MemoryTable(), new MemoryTable()));
   const config = parseConfig({ projects: { news: project } });
-  assert.doesNotThrow(() => guard.call(fiber, config));
   assert.equal(f.ctx.workspaceRegistry.list().length, 0);
   await assert.rejects(stat(documents), { code: 'ENOENT' });
-  const configured = await service.configure(config); await service.save(configured);
+  const configured = await service.configure(config); await bindings.put('current', workspaceBindings(configured));
   const path = join(documents, 'deepseek-harness', 'news');
   assert.equal(configured.get('news').workspace_path, path);
   assert.equal(bindings.get('current').news.workspace_path, path);

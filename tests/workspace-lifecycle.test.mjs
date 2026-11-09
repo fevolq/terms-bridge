@@ -1,3 +1,5 @@
+import { DatabaseSync } from 'node:sqlite';
+import { projectOperations } from './config-ops.mjs';
 import test from 'node:test';
 import { mountNativeWorkspaces } from './native-workspaces.mjs';
 import assert from 'node:assert/strict';
@@ -8,9 +10,6 @@ import { tmpdir } from 'node:os';
 import { join, relative, isAbsolute } from 'node:path';
 import { apply } from '../dist/index.js';
 import { parseConfig } from '../dist/projects/config.js';
-import { domainSpec } from '../dist/storage/tasks.js';
-import { conversationKey } from '../dist/domain/request.js';
-import { conversation } from './helpers.mjs';
 
 test('native project bindings prevent recreation on settings reads, edits and plugin reloads without any tasks', {
   skip: !process.env.DSH_TEST_PACKAGE,
@@ -40,11 +39,12 @@ test('native project bindings prevent recreation on settings reads, edits and pl
   const unexpected = () => assert.fail('Configuration operations must not run a conversation');
   const creations = [];
   const host = {
+    profileContext: { dir }, settings: { writable: true },
     baseUrl: ctx.baseUrl, workspaceController: ctx.workspaceController, pluginPackages: ctx.pluginPackages,
     workspaceRegistry: { list: () => ctx.workspaceRegistry.list(), create: async (...args) => {
       creations.push(args[0]); return ctx.workspaceRegistry.create(...args);
     } },
-    storageDomain: ctx.storageDomain, sessionPersistence: ctx.sessionPersistence,
+    sessionPersistence: ctx.sessionPersistence,
     agents: { get: () => undefined }, permissionPresets: { set: unexpected },
     sessionController: { create: unexpected, resolveAgent: unexpected,
       agents: { selectionFor: unexpected, selectForNextRequest: unexpected } },
@@ -58,64 +58,26 @@ test('native project bindings prevent recreation on settings reads, edits and pl
   const missing = async path => assert.equal(await ctx.workspaceRegistry.resolveByPath(path), undefined);
 
   await start();
-  config = parseConfig({ projects: { news: project } });
-  const paths = await remote.workspaces();
-  assert.equal(creations.length, 1, 'first configuration creates its workspace');
-  const first = await ctx.workspaceRegistry.resolveByPath(paths.news);
-  await ctx.workspaceRegistry.delete(first.id);
-  assert.deepEqual(await remote.workspaces(), paths); await missing(paths.news);
-  config.projects.news.model = 'model-b';
-  assert.deepEqual(await remote.workspaces(), paths); await missing(paths.news);
-  assert.equal(creations.length, 1, 'reading and editing a project must not recreate the workspace');
+  const save = async projects => {
+    const view=remote.settings(), result=await remote.mutate(projectOperations(view.value.projects,projects),view.revision);
+    assert.equal(result.accepted,true,result.error?.message);
+  };
+  await save({news:project});const paths=await remote.workspaces();
+  assert.equal(creations.length,1);
+  const first=await ctx.workspaceRegistry.resolveByPath(paths.news);await ctx.workspaceRegistry.delete(first.id);
+  assert.deepEqual(await remote.workspaces(),paths);await missing(paths.news);
+  await save({news:{...project,model:'model-b'}});await missing(paths.news);assert.equal(creations.length,1);
   await stop();
-
-  const saved = await ctx.storageDomain.open(domainSpec);
-  assert.equal([...saved.table('tasks').entries()].length, 0);
-  assert.equal([...saved.table('conversations').entries()].length, 0);
-  assert.deepEqual(saved.table('projects').get('current'), { news: { workspace_path: paths.news } });
-  await saved.close();
-  // Existing automatic paths no longer depend on a default workspace registration.
+  const db=new DatabaseSync(join(dir,'data','terms-bridge.sqlite'));
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM tasks').get().n,0);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM session_mappings').get().n,0);
+  assert.equal(JSON.parse(db.prepare('SELECT binding FROM projects WHERE key=?').get('news').binding).workspace_path,paths.news);db.close();
   await ctx.workspaceRegistry.delete(defaultWorkspace.id);
-  await start();
-  assert.deepEqual(await remote.workspaces(), paths); await missing(paths.news);
-  assert.equal(creations.length, 1, 'reload must remember initialized projects even without task history');
-  await missing(defaultWorkspace.path);
-
-  config.projects.added = { ...config.projects.news };
-  const expanded = await remote.workspaces();
-  assert.equal(creations.length, 2); await missing(paths.news);
+  config=parseConfig({projects:{stale:project}});await start();
+  assert.deepEqual(await remote.workspaces(),paths);await missing(paths.news);assert.equal(creations.length,1);
+  await save({news:project,added:project});const expanded=await remote.workspaces();assert.equal(creations.length,2);await missing(paths.news);
   assert.ok(await ctx.workspaceRegistry.resolveByPath(expanded.added));
-  delete config.projects.news;
-  assert.deepEqual(await remote.workspaces(), { added: expanded.added });
-  await stop(); await start();
-  config.projects.news = { ...config.projects.added };
-  assert.deepEqual(await remote.workspaces(), expanded);
-  assert.equal(creations.length, 3, 'adding the removed project again is a new configuration');
-  const replacement = await ctx.workspaceRegistry.resolveByPath(paths.news);
-  assert.notEqual(replacement.id, first.id);
-
-  // Startup does not infer workspace paths from historical conversations.
-  await stop();
-  const legacyPath = join(dir, 'old-documents', 'deepseek-harness', 'legacy'); await mkdir(legacyPath, { recursive: true });
-  const legacy = { ...conversation(), project_id: 'legacy', workspace_path: legacyPath, workspace_id: 'removed-registration' };
-  const retiredPath = join(dir, 'retired'); await mkdir(retiredPath);
-  const retired = { ...conversation(), project_id: 'legacy', conversation_id: 'retired-conversation',
-    workspace_path: retiredPath, workspace_id: 'retired-registration' };
-  const legacyDomain = await ctx.storageDomain.open({ ...domainSpec,
-    tables: { tasks: domainSpec.tables.tasks, conversations: domainSpec.tables.conversations } });
-  await legacyDomain.table('conversations').put(conversationKey(retired.project_id, retired.conversation_id), retired);
-  await legacyDomain.table('conversations').put(conversationKey(legacy.project_id, legacy.conversation_id), legacy);
-  await legacyDomain.close();
-  config = parseConfig({ projects: { legacy: project } });
-  await start();
-  assert.deepEqual(await remote.workspaces(), { legacy: undefined });
-  assert.equal(creations.length, 3); await missing(legacyPath);
-
-  // Saving an empty configuration is distinct from never having saved the new binding record.
-  config = parseConfig({}); await remote.workspaces();
-  await stop(); await start();
-  const newPath = join(dir, 'readded'); await mkdir(newPath);
-  config = parseConfig({ projects: { legacy: { ...project, workspace_path: newPath } } });
-  assert.deepEqual(await remote.workspaces(), { legacy: newPath });
-  assert.equal(creations.length, 4);
+  await save({});await stop();await start();assert.deepEqual(await remote.workspaces(),{});
+  const newPath=join(dir,'readded');await mkdir(newPath);await save({news:{...project,workspace_path:newPath}});
+  assert.equal((await remote.workspaces()).news,newPath);assert.equal(creations.length,3);
 });

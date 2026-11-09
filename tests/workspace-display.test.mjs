@@ -1,3 +1,5 @@
+import { BridgeDatabase } from '../dist/storage/database.js';
+import { ProjectSettings } from '../dist/projects/settings.js';
 import test from 'node:test';
 import { mountNativeWorkspaces } from './native-workspaces.mjs';
 import assert from 'node:assert/strict';
@@ -33,10 +35,15 @@ test('native settings Remote reads applied project paths, not directory names or
   const common = { provider: 'mock', model: 'mock', callback_url: 'http://localhost/results' };
   let config = parseConfig({ projects: { news: common, custom: { ...common, workspace_path: join(dir, 'manual') } } });
   const projects = await resolveProjects(ctx, config, undefined, directory);
-  const plugin = ctx.plugin({ inject: ['typert', 'workspaceRegistry'], apply(host) { exposeWorkspaces(host, projects, async () => {
-    const next = await resolveProjects(host, config, projects, directory);
-    projects.clear(); for (const [id, project] of next) projects.set(id, project);
-  }); } }); await plugin.await();
+  const db = new BridgeDatabase(join(dir, 'data', 'terms-bridge.sqlite')); t.after(() => db.close());
+  db.writeSettings(config, 1);
+  let writable = true;
+  const settings = new ProjectSettings(db, () => writable, async (next, persist) => {
+    const resolved = await resolveProjects(ctx, next, projects, directory); persist(resolved); config = next;
+    projects.clear(); for (const [id, project] of resolved) projects.set(id, project);
+  });
+  t.after(() => settings.close());
+  const plugin = ctx.plugin({ inject: ['typert', 'workspaceRegistry'], apply(host) { exposeWorkspaces(host, projects, settings); } }); await plugin.await();
   const peer = { id: 'settings-test', ctx: ctx.extend(), principal: { kind: 'owner' }, signal: new AbortController().signal, interactions: 'none', dispose: async () => {} };
   const request = { namespace: 'termsBridge', method: 'workspaces', args: {}, peer };
   const paths = await ctx.typertGateway.invoke(request);
@@ -47,20 +54,30 @@ test('native settings Remote reads applied project paths, not directory names or
   await client.plugin(registry.default).await();
   client.provide('connection', { interactions: 'none', rpc: {
     open() {}, async call(_base, endpoint, payload) {
-      assert.equal(endpoint, 'termsBridge/workspaces');
-      return { ok: true, value: await ctx.typertGateway.invoke({ ...request, args: payload.args }) };
+      assert.ok(endpoint.startsWith('termsBridge/'));
+      return { ok: true, value: await ctx.typertGateway.invoke({ ...request, method: endpoint.split('/')[1], args: payload.args }) };
     },
   } });
   await client.plugin(await load('dsh-api-gateway/client')).await();
-  let readPaths;
+  let readPaths, readSettings, mutate;
   await client.plugin({ inject: ['remote'], async apply(c) {
     await c.remote.$mount(WORKSPACES_REMOTE);
     await c.inject(['remote.termsBridge'], async scope => {
       readPaths = () => scope.remote.termsBridge.workspaces();
+      readSettings = () => scope.remote.termsBridge.settings();
+      mutate = (...args) => scope.remote.termsBridge.mutate(...args);
       assert.deepEqual(await readPaths(), { ok: true, value: paths });
     }).await();
   } }).await();
-  config = parseConfig({ projects: { added: common } });
+  const view = await readSettings(); assert.equal(view.ok, true);
+  const saved = await mutate([{ op:'set', path:['projects','news','model'], value:'remote-model' }], view.value.revision);
+  assert.equal(saved.ok,true);assert.equal(saved.value.accepted,true);assert.equal(db.readSettings().config.projects.news.model,'remote-model');
+  const stale = await mutate([], view.value.revision);assert.equal(stale.value.error.code,'REVISION_CONFLICT');
+  writable=false;const readonly=await mutate([],saved.value.view.revision);assert.equal(readonly.value.error.code,'READ_ONLY');writable=true;
+  await assert.rejects(ctx.typertGateway.invoke({...request,method:'mutate',args:{ops:[],revision:saved.value.view.revision},peer:{...peer,principal:{kind:'guest'}}}),/access denied/);
+  await assert.rejects(ctx.typertGateway.invoke({...request,method:'mutate',args:{ops:'invalid',revision:1}}),/boundary validation/);
+  const next = await mutate([{op:'unset',path:['projects','news']},{op:'unset',path:['projects','custom']},{op:'set',path:['projects','added'],value:common}], saved.value.view.revision);
+  assert.equal(next.value.accepted,true);
   assert.deepEqual(await ctx.typertGateway.invoke(request), { added: join(dir, 'deepseek-harness', 'added') });
   assert.deepEqual(await readPaths(), { ok: true, value: { added: join(dir, 'deepseek-harness', 'added') } });
   await assert.rejects(ctx.typertGateway.invoke({ ...request, peer: { ...peer, principal: { kind: 'guest' } } }), /access denied/);

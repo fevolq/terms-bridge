@@ -1,12 +1,13 @@
+import type { ProjectSettings } from '../projects/settings.js';
 import type { Host } from './host.js';
 import type { ProjectState } from '../domain/types.js';
 import { WORKSPACES_REMOTE } from '../shared/workspaces.js';
 
-export function exposeWorkspaces(host: Host, projects: ReadonlyMap<string, ProjectState>, refresh: () => Promise<void>): void {
+export function exposeWorkspaces(host: Host, projects: ReadonlyMap<string, ProjectState>, settings: ProjectSettings): void {
   const service = {
-    async workspaces() {
-      // A settings save may finish before its configuration has been applied.
-      await refresh();
+    settings: () => settings.view(),
+    mutate: (ops: unknown, revision: unknown) => settings.mutate(ops, revision),
+    workspaces() {
       return Object.fromEntries([...projects].map(([id, project]) => [id, project.workspace_path ?? project.configured_path]));
     },
   };

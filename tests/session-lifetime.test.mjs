@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { fixture, request, successRun, deferred, listenHttp, MemoryTable } from './helpers.mjs';
+import { fixture, request, successRun, deferred, listenHttp } from './helpers.mjs';
 import { handler } from '../dist/http/api.js';
 import { recordSchema } from '../dist/storage/tasks.js';
 import { UnsettledExecutionError } from '../dist/domain/types.js';
@@ -118,7 +118,7 @@ test('one deletion marker stops every chat without rewriting tasks and survives 
   assert.equal(f.store.busy(request().metadata), false);
   await f.engine.reconfigure(new Map());
   await f.engine.close();
-  const restored = await fixture({ table: f.table, conversationTable: f.conversationTable,
+  const restored = await fixture({ database: f.database,
     run: async () => assert.fail('A deleted conversation must not execute'),
     callback: async () => assert.fail('A deleted conversation must not deliver callbacks'),
     sessionExists: async () => assert.fail('A known deletion does not require another host lookup'),
@@ -133,10 +133,9 @@ test('one deletion marker stops every chat without rewriting tasks and survives 
 
 test('a delayed task write observes a conversation deleted while it was waiting', async t => {
   const entered = deferred(), resume = deferred();
-  class DelayedTable extends MemoryTable {
-    async update(key, change) { entered.resolve(); await resume.promise; return super.update(key, change); }
-  }
-  const f = await fixture({ table: new DelayedTable() });
+  const f = await fixture();
+  const updateTask = f.table.update.bind(f.table);
+  f.table.update = async (key, change) => { entered.resolve(); await resume.promise; return updateTask(key, change); };
   t.after(async () => { resume.resolve(); await f.engine.close(); });
   await f.engine.accept(request()); const before = f.record();
   const update = f.store.update(taskKey('news', 'task-1', 'chat-1'), () => assert.fail('Late transition must be ignored'));

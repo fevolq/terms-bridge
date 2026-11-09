@@ -1,4 +1,5 @@
-import { ProjectWorkspaces, saveProjectWorkspaces } from '../dist/projects/workspaces.js';
+import { FileLibrary } from '../dist/storage/files.js';
+import { ProjectWorkspaces, workspaceBindings } from '../dist/projects/workspaces.js';
 import { MemoryTable } from './helpers.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -7,7 +8,7 @@ import { pathToFileURL } from 'node:url';
 import { mkdtemp, mkdir, rm, stat } from 'node:fs/promises';
 import { join, relative, isAbsolute } from 'node:path';
 import { tmpdir } from 'node:os';
-import { fixture, request, deferred, until } from './helpers.mjs';
+import { temporaryDatabase, fixture, request, deferred, until } from './helpers.mjs';
 import { mountNativePresets } from './native-presets.mjs';
 import { mountNativeController } from './native-controller.mjs';
 import { makeRunner } from '../dist/dsh/runner.js';
@@ -75,11 +76,12 @@ test('native followups retain the original preset and reuse an idle history runt
   }
   const workspacePath = join(root, 'workspace'); await mkdir(workspacePath);
   const workspace = await ctx.workspaceRegistry.create(workspacePath);
-  const run = makeRunner(ctx);
-  f = await fixture({ run, sessionExists: async id => (await ctx.sessionPersistence.stat(id)) !== undefined,
+  const database = temporaryDatabase(), files = new FileLibrary(database);
+  const run = makeRunner(ctx, files);
+  f = await fixture({ database, files, run, sessionExists: async id => (await ctx.sessionPersistence.stat(id)) !== undefined,
     sessionBusy: id => agentBusy(ctx.agents.get(id)),
     overrides: { workspace_path: workspace.path, agent_preset: 'test-default', model: 'first-model' } });
-  const bindings = new MemoryTable(); await saveProjectWorkspaces(bindings, f.projects);
+  const bindings = new MemoryTable(); await bindings.put('current', workspaceBindings(f.projects));
   const workspaces = new ProjectWorkspaces(ctx, bindings, () => root, f.projects);
   f.engine.ports.prepareProject = (id, signal, beforeRelocate) => workspaces.prepare(id, signal, beforeRelocate);
   const configure = patch => f.engine.reconfigure(new Map([['news', { ...f.projects.get('news'), ...patch }]]));

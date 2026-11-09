@@ -23,34 +23,24 @@ async function fixture(paths = { news: 'F:/work/news' }) {
   };
   const ctx = {
     inject: (_services, apply) => ({ await: async () => apply(ctx) }),
-    effect: fn => { const dispose = fn(); if (dispose) cleanup.push(dispose); }, on() {},
-    configForms: {
-      get: () => ({ getSnapshot: () => snapshot, subscribe(fn) { listeners.add(fn); return () => listeners.delete(fn); } }),
-      describe: () => ({ getSnapshot: () => ({ view: { namespaces: [{ ns: 'terms-bridge', secrets: [] }] } }), acceptView: change }),
-    },
+    effect: fn => { const dispose = fn(); if (dispose) cleanup.push(dispose); }, on(event, fn) { if (event === 'connection/reset') listeners.add(fn); const dispose=()=>listeners.delete(fn); cleanup.push(dispose); return dispose; },
     // Other dsh workspaces may have the same directory name; the page must not search this list.
     workspaces: { list: { subscribe() {}, getSnapshot: () => { throw new Error('Workspace guessing is forbidden'); } } },
     remote: { $on() {}, $mount: async contribution => {
       assert.equal(contribution.descriptors[0].namespace, 'termsBridge'); return () => {};
     },
-      termsBridge: { workspaces: async () => ({ ok: true, value: paths }) },
+      termsBridge: { workspaces: async () => ({ ok: true, value: paths }), settings: async () => snapshot.status === 'ready' ? ({ ok: true, value: snapshot }) : ({ ok: false }), async mutate(ops, revision) {
+        assert.equal(revision, snapshot.revision); const value = structuredClone(snapshot.value);
+        for (const op of ops) { let target=value; for (const key of op.path.slice(0,-1)) target=target[key]??={}; if(op.op==='set') target[op.path.at(-1)]=op.value;else delete target[op.path.at(-1)]; }
+        snapshot={...snapshot,revision:revision+1,value};return {ok:true,value:{accepted:true,view:snapshot}};
+      } },
       session: { modelCatalog: async () => ({ ok: true, value: { groups: [{ id: 'deepseek', name: 'DeepSeek', models: [{ id: 'chat', name: '聊天模型' }] }], failures: [] } }) },
       agentPresets: { list: async () => ({ ok: true, value: { presets: [{ id: 'standard' }, { id: 'no-subagent', name: 'NoSubAgent', isDefault: true }] } }) },
-      settings: { async mutate(namespace, ops, revision) {
-        assert.equal(namespace, 'terms-bridge'); assert.equal(revision, snapshot.revision);
-        const value = structuredClone(snapshot.value);
-        for (const op of ops) {
-          let target = value;
-          for (const key of op.path.slice(0, -1)) target = target[key] ??= {};
-          if (op.op === 'set') target[op.path.at(-1)] = op.value; else delete target[op.path.at(-1)];
-        }
-        return { ok: true, value: { ...snapshot, revision: revision + 1, value } };
-      } },
     },
     slots: { inject: (_name, fn) => fn(), register(info, component) { registration = info; Component = component; } },
   };
   runInNewContext(await readFile(new URL('../dist/client.js', import.meta.url), 'utf8'), {
-    structuredClone, TextEncoder, URL,
+    structuredClone, TextEncoder, URL, setInterval, clearInterval,
     window: { __ModuleLoader__: { load(value) { extension = value; } } },
     document: { createElement() { return { remove() { styles.pop(); } }; }, head: { append: value => styles.push(value) }, body: {}, querySelectorAll: () => [], getElementById: () => null },
     MutationObserver: class { observe() {} disconnect() {} }, requestAnimationFrame: fn => fn(),
@@ -115,8 +105,8 @@ test('saved manual paths display the host resolved path and refresh with setting
 test('shipped settings bundle renders unavailable and read-only states without editable controls', async t => {
   const f = await fixture(); t.after(() => f.close()); await f.flush();
   f.change({ status: 'unavailable', writable: false, revision: 2 });
-  assert.match(text(f.render()), /当前无法读取插件配置/);
+  assert.match(text(await f.flush()), /当前无法读取插件配置/);
   f.change({ status: 'ready', writable: false, revision: 3 });
-  const tree = f.render(); assert.match(text(tree), /配置为只读/);
+  const tree = await f.flush(); assert.match(text(tree), /配置为只读/);
   assert.equal(nodes(tree).find(node => node.type === 'button' && text(node) === '添加第一个项目').props.disabled, true);
 });

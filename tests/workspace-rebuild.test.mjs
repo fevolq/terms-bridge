@@ -7,7 +7,7 @@ import { homedir, tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, relative } from 'node:path';
 import { MemoryTable, deferred, fixture, listenHttp, project, request, successRun, until } from './helpers.mjs';
 import { handler } from '../dist/http/api.js';
-import { ProjectWorkspaces, resolveProjects, saveProjectWorkspaces } from '../dist/projects/workspaces.js';
+import { ProjectWorkspaces, resolveProjects, workspaceBindings } from '../dist/projects/workspaces.js';
 
 async function setup(t, manual = false) {
   const root = await mkdtemp(join(tmpdir(), 'bridge-rebuild-'));
@@ -15,7 +15,7 @@ async function setup(t, manual = false) {
   const configured = { ...project(), workspace_path: manual ? path : undefined };
   const f = await fixture({ overrides: { workspace_path: path }, run: successRun });
   if (manual) f.projects.get('news').configured_path = path;
-  const bindings = new MemoryTable(); await saveProjectWorkspaces(bindings, f.projects);
+  const bindings = new MemoryTable(); await bindings.put('current', workspaceBindings(f.projects));
   const registered = new Map([[path, { id: 'workspace-1', path, attachSession: async () => {} }]]);
   let creates = 0, lookups = 0, removed = 0;
   const host = { workspaceRegistry: { list: () => [...registered.values()], create: async path => {
@@ -157,7 +157,7 @@ test('failed binding persistence is retryable and configuration waits for recove
   const change = f.engine.reconfigure(async () => {
     configured = true;
     return resolveProjects(f.host, { projects: { news: { ...f.configured, model: 'changed' } } }, f.projects, f.directory);
-  }, next => saveProjectWorkspaces(f.bindings, next));
+  }, next => f.bindings.put('current', workspaceBindings(next)));
   assert.equal(configured, false); gate.resolve(); await admission; await change;
   assert.equal(f.projects.get('news').workspace_path, f.fallback);
   assert.equal(f.projects.get('news').model, 'changed'); assert.equal(f.record('new').project.model, f.configured.model);
@@ -233,12 +233,12 @@ test('startup defers default-directory lookup and registration for an unbound au
 });
 
 test('an existing conversation binding reports an unusable directory without rebinding or repairing its record', async t => {
-  const f = await setup(t); f.table.failWrites = true;
-  await assert.rejects(f.engine.accept(request()), /disk unavailable/);
+  const f = await setup(t);
+  await f.engine.accept(request()); await f.cycle();
   const conversation = f.store.conversations.get(request().metadata);
-  assert.equal(conversation.created, false); assert.equal(f.store.list().length, 0);
-  f.table.failWrites = false; await f.blockDirectory();
-  await assert.rejects(f.engine.accept(request()), error => error.code === 'CONVERSATION_WORKSPACE_CHANGED');
+  assert.equal(conversation.created, false); assert.equal(f.store.list().length, 1);
+  await f.blockDirectory();
+  await assert.rejects(f.engine.accept(request('task-1', 'news', 'next')), error => error.code === 'CONVERSATION_WORKSPACE_CHANGED');
   assert.deepEqual(f.store.conversations.get(request().metadata), conversation);
   assert.equal(f.counts().lookups, 0);
 });
@@ -260,7 +260,7 @@ test('ordinary configuration edits do not persist unresolved manual paths or tri
   const config = { projects: { news: { ...f.configured, workspace_path: alias } } };
   await service.load(config);
   config.projects.news.model = 'updated';
-  const next = await service.configure(config); await service.save(next);
+  const next = await service.configure(config); await bindings.put('current', workspaceBindings(next));
   service.projects.clear(); for (const [id, project] of next) service.projects.set(id, project);
   assert.equal(service.projects.get('news').workspace_path, undefined);
   assert.equal(service.projects.get('news').configured_path, alias);
@@ -278,7 +278,7 @@ test('startup and existing configuration edits leave conflicting saved paths unc
   const service = new ProjectWorkspaces(f.host, bindings, f.directory);
   const config = { projects: { news: f.configured, other: { ...f.configured, model: 'other' } } };
   await service.load(config);
-  await service.save(await service.configure(config));
+  await bindings.put('current', workspaceBindings(await service.configure(config)));
   assert.deepEqual(f.counts(), { creates: 0, lookups: 0 });
   await assert.rejects(service.prepare('news', f.engine.stop.signal, () => {}), /belongs to another project/);
 });

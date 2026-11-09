@@ -5,7 +5,6 @@ import { TaskEngine } from '../dist/services/tasks.js';
 import { taskKey } from '../dist/domain/request.js';
 import { LIMITS } from '../dist/shared/rules.js';
 const CALLBACK_RETRY_MS = LIMITS.callbackInterval;
-import { UnsettledExecutionError } from '../dist/domain/types.js';
 import { recordSchema } from '../dist/storage/tasks.js';
 
 test('concurrent duplicate admission creates one durable task; conflicts cannot overwrite', async () => {

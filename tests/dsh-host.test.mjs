@@ -1,3 +1,4 @@
+import { projectOperations } from './config-ops.mjs';
 import test from 'node:test';
 import { mountNativeWorkspaces } from './native-workspaces.mjs';
 import assert from 'node:assert/strict';
@@ -6,7 +7,7 @@ import { pathToFileURL } from 'node:url';
 import { mkdtemp, mkdir, readFile, writeFile, rename, stat } from 'node:fs/promises';
 import { basename, join, relative, isAbsolute } from 'node:path';
 import { tmpdir } from 'node:os';
-import { randomUUID } from 'node:crypto';
+import { format } from 'node:util';
 import { request, deferred, until } from './helpers.mjs';
 import { mountNativePresets } from './native-presets.mjs';
 import { mountNativeController } from './native-controller.mjs';
@@ -21,9 +22,13 @@ test('installed dsh core executes task, persists workspace membership, collects 
 }, async t => {
   const requireHost = createRequire(process.env.DSH_TEST_PACKAGE);
   async function load(name) { return import(pathToFileURL(requireHost.resolve(`@deepseek-ai/${name}`))); }
-  const { Context, Service, resolveConfig } = await load('cordis'); const ctx = new Context(); const fibers = [];
-  ctx.logger.exporter({ export(event) { if (event.type === 'error') console.error(event.name, ...event.args); } });
-  t.after(async () => { for (const fiber of [...fibers].reverse()) await fiber.dispose(); });
+  const { Context, resolveConfig } = await load('cordis'); const ctx = new Context(); const fibers = [];
+  const hostErrors = [];
+  ctx.logger.exporter({ export(event) { if (event.type === 'error') hostErrors.push(format(event.name, ...event.args)); } });
+  t.after(async () => {
+    try { for (const fiber of [...fibers].reverse()) await fiber.dispose(); }
+    finally { assert.deepEqual(hostErrors, [], 'Unexpected DSH host errors'); }
+  });
   async function mount(name, config = {}) {
     const m = await load(name); const f = ctx.plugin(m.default ?? m, config); fibers.push(f); await f.await();
     return m;
@@ -133,11 +138,16 @@ test('installed dsh core executes task, persists workspace membership, collects 
   const config = { projects: { news: { name: '同名项目', workspace_path: workspace, provider: 'test-business', model: 'mock-business',
     max_concurrency: 1, max_execution_retries: 0, execution_timeout_seconds: 20,
     callback_url: origin + '/test-callback', request_token: 'isolated-host-token' } } };
-  const plugin = ctx.plugin(bridge, config); fibers.push(plugin); await plugin.await();
+  const plugin = ctx.plugin(bridge, { projects: 'ignored profile configuration' }); fibers.push(plugin); await plugin.await();
+  const initialView = ctx.termsBridge.settings();
+  assert.deepEqual(initialView.value.projects, {});
+  assert.equal(await ctx.workspaceRegistry.resolveByPath(workspace), undefined, 'startup must not register workspaces');
+  const initialized = await ctx.termsBridge.mutate(projectOperations({}, config.projects), initialView.revision);
+  assert.equal(initialized.accepted, true, initialized.error?.message);
   assert.deepEqual(await ctx.termsBridge.workspaces(), { news: taskPath(workspace) });
   const prefix = origin + '/api/terms-bridge';
   const initialWorkspace = await ctx.workspaceRegistry.resolveByPath(workspace);
-  assert.equal(initialWorkspace, undefined, 'startup must not register workspaces');
+  assert.ok(initialWorkspace, 'adding a project must register its workspace');
   const form = new FormData(); form.append('file', new Blob(['native attachment']), '原始 100%20.TXT');
   const upload = await fetch(prefix + '/projects/news/files', { method: 'POST', headers: { Authorization: 'Bearer isolated-host-token' }, body: form });
   assert.equal(upload.status, 201); const file = await upload.json();
@@ -182,28 +192,13 @@ test('installed dsh core executes task, persists workspace membership, collects 
   assert.equal(second.result, 'native continuation result'); assert.deepEqual(second.files, []);
   assert.equal(grouped.sessionIds.filter(id => id === task.execution.session_id).length, 1);
 
-  // Exercise the same settings mutation API used by the UI, with an isolated
-  // profile editor. No user profile or live dsh configuration is modified.
+  // Exercise the plugin's SQLite configuration API without touching profile YAML.
   const { updateVolatile } = await load('cosmokit');
-  let saved = config;
-  const entry = { id: 'terms-bridge', options: { id: 'terms-bridge' }, fiber: plugin };
-  class Editor extends Service {
-    constructor(c) { super(c, 'configEditor'); }
-    documentPath = join(dir, 'profile'); writable = true;
-    entries() { return [entry]; }
-    configuration() { return [{ entry, inherited: {}, override: saved }]; }
-    async edit(_entry, change) {
-      const next = change(saved, {}); const candidate = resolveConfig(plugin.runtime, next);
-      for (const field of ['projects', 'api_prefix']) updateVolatile(plugin.config[field], candidate[field]);
-      saved = next; entry.options.config = next;
-    }
-  }
-  class Profile extends Service { constructor(c) { super(c, 'profileContext'); } home = dir; }
-  for (const service of [Editor, Profile]) { const f = ctx.plugin(service); fibers.push(f); await f.await(); }
-  await mount('dsh-settings');
-  const set = async (field, value) => {
-    const before = ctx.settings.describe().find(v => v.ns === 'terms-bridge');
-    await ctx.settings.mutate('terms-bridge', [{ op: 'set', path: [field], value }], before.revision);
+  const set = async (field, value, accepted = true) => {
+    const before = ctx.termsBridge.settings();
+    const ops = field === 'projects' ? projectOperations(before.value.projects, value) : [{ op:'set', path:[field], value }];
+    const result = await ctx.termsBridge.mutate(ops, before.revision);
+    assert.equal(result.accepted, accepted, result.error?.message);
   };
   const post = (id, project = 'news', base = prefix) => fetch(base + '/tasks', {
     method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer isolated-host-token' }, body: JSON.stringify(request(id, project)),
@@ -235,8 +230,9 @@ test('installed dsh core executes task, persists workspace membership, collects 
   assert.equal((await post('new-settings')).status, 202);
   await until(() => callbackIds.includes('new-settings')); assert.ok(models.includes('new-business'));
   // An invalid saved workspace does not cancel work or replace the active registry.
-  await set('projects', { ...nextProjects, broken: { ...config.projects.news, workspace_path: join(dir, 'missing') } });
-  assert.equal((await post('not-admitted')).status, 503);
+  await set('projects', { ...nextProjects, broken: { ...config.projects.news, workspace_path: join(dir, 'missing') } }, false);
+  assert.equal((await post('still-admitted')).status, 202);
+  await until(() => callbackIds.includes('still-admitted'));
   assert.equal((await query('in-flight')).status, 'completed');
   await set('projects', nextProjects);
   assert.equal((await post('after-correction')).status, 202);
@@ -278,12 +274,20 @@ test('installed dsh core executes task, persists workspace membership, collects 
   const beforeUnavailable = calls;
   assert.equal((await post('auto-unavailable')).status, 202);
   await until(async () => (await query('auto-unavailable')).status === 'failed');
+  const unavailable = await query('auto-unavailable');
+  // This task deliberately removes Auto support; consume only its expected execution error.
+  const expectedError = hostErrors.findIndex(message => message.startsWith(
+    'terms-bridge Execution ' + unavailable.execution.session_id + ': permission: unknown preset "auto"'));
+  assert.notEqual(expectedError, -1, 'Unavailable Auto must report its execution failure');
+  hostErrors.splice(expectedError, 1);
   assert.equal(calls, beforeUnavailable, 'Unavailable Auto must not fall back to unreviewed execution');
+  await set('projects', { news: { ...config.projects.news, permission_mode: 'workspace-write' } });
   const nativeAgent = ctx.agents.get(task.execution.session_id);
   await plugin.dispose();
   assert.equal(ctx.agents.get(task.execution.session_id), nativeAgent, 'Unloading the bridge must not dispose DSH agents');
   // Restart just this plugin over its durable domain; do not rerun a delivered task.
-  const reloaded = ctx.plugin(bridge, { ...saved, projects: { news: { ...config.projects.news, permission_mode: 'workspace-write' } } }); fibers.push(reloaded); await reloaded.await();
+  assert.equal(bridge.Config, undefined, 'SQLite configuration must not register a native profile schema');
+  const reloaded = ctx.plugin(bridge, { projects: 'obsolete legacy configuration' }); fibers.push(reloaded); await reloaded.await();
   const restored = await fetch(prefix + '/projects/news/conversations/task-1/chats/chat-1', { headers: { Authorization: 'Bearer isolated-host-token' } });
   assert.equal((await restored.json()).delivery.status, 'delivered');
   const restoredDownload = await fetch(prefix + '/projects/news/files/' + publishedId, { headers: { Authorization: 'Bearer isolated-host-token' } });

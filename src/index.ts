@@ -1,50 +1,48 @@
+import { join, isAbsolute } from 'node:path';
 import { ApiError } from './domain/request.js';
-import { Config, readConfig, watchProjectConfig, initializeProjectTimestamps } from './dsh/settings.js';
 import { makeRunner } from './dsh/runner.js';
 import { agentBusy } from './dsh/sessions.js';
 import { sessionModels } from './dsh/models.js';
 import { exposeWorkspaces } from './dsh/workspaces.js';
 import type { Host } from './dsh/host.js';
-import { parseConfig } from './projects/config.js';
 import { ProjectWorkspaces } from './projects/workspaces.js';
 import { createWorkspaceDirectory } from './dsh/directories.js';
-import { LiveConfig } from './projects/live.js';
+import { ProjectSettings } from './projects/settings.js';
 import { FileLibrary } from './storage/files.js';
-import { domainSpec, TaskStore } from './storage/tasks.js';
+import { TaskStore } from './storage/tasks.js';
+import { BridgeDatabase } from './storage/database.js';
 import { TaskEngine } from './services/tasks.js';
 import { handler } from './http/api.js';
 import { FileTransfer } from './http/files.js';
 import { sendCallback } from './http/callback.js';
 
-export { Config };
+// Configuration is owned by SQLite; native profile options are not consumed.
 export const name = 'terms-bridge';
-export const inject = ['webServer', 'agents', 'sessionController', 'permissionPresets', 'workspaceRegistry', 'workspaceController', 'pluginPackages', 'storageDomain', 'sessionPersistence', 'sessionProjections', 'attachments', 'typert'];
-export async function apply(host: Host, raw: unknown): Promise<void> {
+export const inject = ['profileContext', 'settings', 'webServer', 'agents', 'sessionController', 'permissionPresets', 'workspaceRegistry', 'workspaceController', 'pluginPackages', 'sessionPersistence', 'sessionProjections', 'attachments', 'typert'];
+export async function apply(host: Host, _raw?: unknown): Promise<void> {
   const required = [host.webServer?.register, host.agents?.get, host.sessionController?.create, host.sessionController?.resolveAgent,
     host.permissionPresets?.set, host.workspaceRegistry?.list, host.workspaceRegistry?.create, host.sessionPersistence?.stat, host.sessionProjections?.stateOf,
-    host.attachments?.saveImage, host.attachments?.saveFileStream, host.attachments?.fileHostPath, host.attachments?.imageHostPath, host.storageDomain?.open, host.effect];
-  if (required.some(value => typeof value !== 'function')) throw new Error('Incompatible dsh public services for terms-bridge');
+    host.attachments?.saveImage, host.attachments?.saveFileStream, host.attachments?.fileHostPath, host.attachments?.imageHostPath, host.effect];
+  if (required.some(value => typeof value !== 'function') || !host.profileContext?.dir || !isAbsolute(host.profileContext.dir) || !host.settings)
+    throw new Error('Incompatible dsh public services for terms-bridge');
   sessionModels(host);
-  const initial = parseConfig(readConfig(raw)), log = host.logger?.(name);
-  const domain = await host.storageDomain.open(domainSpec), store = new TaskStore(domain.table('tasks'), domain.table('conversations'));
-  const library = new FileLibrary(), transfer = new FileTransfer(library);
-  let tasks: TaskEngine | undefined, live: LiveConfig | undefined, timer: ReturnType<typeof setInterval> | undefined;
-  let route: (() => void) | undefined, guard: (() => void) | undefined, notice: (() => void) | undefined, closed = false;
+  const log = host.logger?.(name), database = new BridgeDatabase(join(host.profileContext.dir, 'data', 'terms-bridge.sqlite'));
+  let tasks: TaskEngine | undefined, settings: ProjectSettings | undefined, route: (() => void) | undefined, closed = false;
   const close = async () => {
     if (closed) return;
-    closed = true;
-    clearInterval(timer); route?.(); guard?.(); notice?.();
-    const updates = live?.close();
-    // A config update may await uploads; abort/drain requests before waiting for that update.
-    await tasks?.close(); await updates; await domain.close();
+    closed = true; route?.();
+    const updates = settings?.close();
+    // Configuration can be waiting for an upload. Abort/drain requests before waiting for it.
+    await tasks?.close(); await updates; database.close();
   };
   host.effect(() => close);
   try {
-    const directory = createWorkspaceDirectory(host);
     if (closed) throw new Error('Plugin closed during initialization');
-    const workspaces = new ProjectWorkspaces(host, domain.table('projects'), directory);
+    const initial = database.readSettings().config;
+    const store = new TaskStore(database);
+    const workspaces = new ProjectWorkspaces(host, database.bindings, createWorkspaceDirectory(host));
     await workspaces.load(initial);
-    const projects = workspaces.projects;
+    const projects = workspaces.projects, library = new FileLibrary(database), transfer = new FileTransfer(library);
     tasks = new TaskEngine(store, projects, makeRunner(host, library), {
       files: library, callback: sendCallback, log: text => log?.error(text),
       prepareProject: (id, signal, beforeRelocate) => workspaces.prepare(id, signal, beforeRelocate),
@@ -53,34 +51,28 @@ export async function apply(host: Host, raw: unknown): Promise<void> {
     });
     await tasks.recover();
     if (closed) throw new Error('Plugin closed during initialization');
-    guard = watchProjectConfig(host, projects, store);
     let prefix = initial.api_prefix;
     const register = (path: string) => host.webServer.register({ kind: 'prefix', path,
-      handler: handler(tasks!, path, transfer, async method => {
-        if (method === 'POST') {
-          try { await live?.refresh(true); }
-          catch { throw new ApiError(503, 'SERVICE_UNAVAILABLE', 'Saved project configuration could not be applied; check terms-bridge logs'); }
-        }
-        if (path !== prefix) throw new ApiError(404, 'NOT_FOUND', 'Task API prefix has changed');
+      handler: handler(tasks!, path, transfer, async () => {
+        if (path !== prefix) throw new ApiError(503, 'SERVICE_UNAVAILABLE', 'Task API configuration is changing');
       }),
     });
-    live = new LiveConfig(() => readConfig(raw), initial, async config => {
-      if (closed) return;
-      await tasks!.reconfigure(() => workspaces.configure(config), async next => {
+    settings = new ProjectSettings(database, () => host.settings.writable, async (config, persist) => {
+      if (closed) throw new Error('Plugin is stopping');
+      // Reject removal before preparing workspaces or touching routing.
+      for (const [, task] of store.pending()) if (store.active(task) && !Object.hasOwn(config.projects, task.request.metadata.project_id))
+        throw new Error('项目 ' + task.request.metadata.project_id + ' 仍有未完成任务，请等待任务执行和结果回调结束后再移除');
+      await tasks!.reconfigure(() => workspaces.configure(config), next => {
+        if (closed) throw new Error('Plugin is stopping');
         const replacement = prefix === config.api_prefix ? undefined : register(config.api_prefix);
-        try { await workspaces.save(next); }
+        try { persist(next); }
         catch (error) { replacement?.(); throw error; }
-        if (closed) { replacement?.(); return; }
-        if (replacement) { route?.(); route = replacement; prefix = config.api_prefix; }
+        if (replacement) { const previous = route; prefix = config.api_prefix; route = replacement; previous?.(); }
       });
-    }, error => log?.error(`Project configuration update failed: ${error instanceof Error ? error.message : 'unknown error'}`));
+    });
     route = register(prefix);
-    exposeWorkspaces(host, projects, () => live!.refresh(true));
-    notice = host.on?.('settings/document-updated', () => { void live!.refresh(true).catch(() => {}); });
-    timer = setInterval(() => { void live!.refresh().catch(() => {}); }, 250);
-    timer.unref();
-    await live.refresh(); tasks.start();
-    initializeProjectTimestamps(host, raw);
-    log?.info(`terms-bridge active: ${prefix}`);
+    exposeWorkspaces(host, projects, settings);
+    tasks.start();
+    log?.info('terms-bridge active: ' + prefix);
   } catch (error) { await close(); throw error; }
 }

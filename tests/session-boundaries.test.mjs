@@ -7,7 +7,7 @@ import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { join, relative, isAbsolute } from 'node:path';
 import { tmpdir } from 'node:os';
 import { setImmediate } from 'node:timers/promises';
-import { fixture, request, deferred, until } from './helpers.mjs';
+import { temporaryDatabase, fixture, request, deferred, until } from './helpers.mjs';
 import { mountNativePresets } from './native-presets.mjs';
 import { mountNativeController } from './native-controller.mjs';
 import { makeRunner } from '../dist/dsh/runner.js';
@@ -80,8 +80,9 @@ test('native task boundaries isolate UI work, file capture and cancellation', {
   await mountNativeController(ctx, mount, load, root, fibers);
   const workspacePath = join(root, 'workspace'); await mkdir(workspacePath);
   const workspace = await ctx.workspaceRegistry.create(workspacePath);
-  async function fresh(overrides = {}, library = new FileLibrary()) {
-    const f = await fixture({ run: makeRunner(ctx, library), files: library,
+  async function fresh(overrides = {}, Library = FileLibrary) {
+    const database = temporaryDatabase(), library = new Library(database);
+    const f = await fixture({ database, run: makeRunner(ctx, library), files: library,
       sessionExists: async id => (await ctx.sessionPersistence.stat(id)) !== undefined,
       sessionBusy: id => agentBusy(ctx.agents.get(id)),
       overrides: { workspace_path: workspace.path, agent_preset: 'test-default', model: 'project-model',
@@ -192,7 +193,7 @@ test('native task boundaries isolate UI work, file capture and cancellation', {
     class Library extends FileLibrary {
       async publish(task, path, signal) { await saving.wait(signal); return super.publish(task, path, signal); }
     }
-    const f = await fresh({}, new Library()), conversation = 'native-' + pending;
+    const f = await fresh({}, Library), conversation = 'native-' + pending;
     const prompt = 'boundary:' + conversation;
     behavior.set(prompt, async () => { await writeFile(join(workspacePath, 'recycle.txt'), 'saved'); return '[result](recycle.txt)'; });
     await f.engine.accept({ ...request(conversation), instruction: prompt }); f.engine.tick(); await saving.entered.promise;
@@ -218,7 +219,7 @@ test('native task boundaries isolate UI work, file capture and cancellation', {
     class Library extends FileLibrary {
       async publish(task, path, signal) { await saving.wait(signal); return super.publish(task, path, signal); }
     }
-    const f = await fresh({}, new Library()), conversation = cancelCapture ? 'cancel-files' : 'files';
+    const f = await fresh({}, Library), conversation = cancelCapture ? 'cancel-files' : 'files';
     const bridgePrompt = 'boundary:' + conversation + ':bridge', uiPrompt = 'boundary:' + conversation + ':ui';
     behavior.set(bridgePrompt, async () => { await writeFile(join(workspacePath, 'report.txt'), 'FIRST-TURN'); return '[report](report.txt)'; });
     behavior.set(uiPrompt, async options => { await writeFile(join(workspacePath, 'report.txt'), 'SECOND-TURN'); await uiRunning.wait(options.signal); });
