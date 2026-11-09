@@ -1,5 +1,9 @@
 terms-bridge 是 DeepSeek Harness（dsh）的项目接入插件，用来连接业务项目与 dsh。业务项目提交提示词和文件，插件在对应工作区内创建或续接原生会话执行任务，并将 AI 的最终回复和结果文件引用回传给项目。
 
+<p align="center">
+  <img src="docs/images/project-settings.png" alt="terms-bridge 项目接入设置界面" width="423">
+</p>
+
 ## 安装（推荐 npm）
 
 需要 Node.js 22.13+ 和兼容的 dsh；已验证 dsh `0.2.1-rc.2`。推荐从 [npm](https://www.npmjs.com/package/@fevolq/terms-bridge) 安装，以下使用 Web profile：
